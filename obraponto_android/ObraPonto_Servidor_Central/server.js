@@ -261,7 +261,8 @@ app.patch('/api/admin/requests/:id',auth,admin,wrap((req,res)=>{
 
 const dist=path.join(here,'web','dist');
 if(fs.existsSync(dist)){
- app.use(express.static(dist,{index:false}));
+ // Evita redirecionamento circular: serve /admin/ e /funcionario/ nas rotas explícitas abaixo.
+ app.use(express.static(dist,{index:false,redirect:false}));
  app.get('/admin',(_req,res)=>res.redirect('/admin/'));
  app.get('/funcionario',(_req,res)=>res.redirect('/funcionario/'));
  app.get('/admin/',(_req,res)=>res.sendFile(path.join(dist,'admin/index.html')));
