@@ -1,0 +1,38 @@
+name: Verificar servidor ObraPonto
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  servidor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Baixar projeto
+        uses: actions/checkout@v4
+
+      - name: Criar imagem Docker
+        run: docker build -t obraponto-servidor:teste .
+
+      - name: Iniciar servidor com credenciais de TESTE
+        run: |
+          docker run -d --name obraponto-teste -p 3001:3001 \
+            -e JWT_SECRET="$(openssl rand -hex 48)" \
+            -e ADMIN_EMAIL="teste@example.invalid" \
+            -e ADMIN_PASSWORD="ApenasTesteNaoUsar123!" \
+            -e ADMIN_NAME="Teste" \
+            -e DB_PATH="/tmp/obraponto.sqlite" \
+            obraponto-servidor:teste
+          for i in $(seq 1 20); do
+            if curl --fail --silent http://localhost:3001/api/health | grep -q '"status":"ok"'; then
+              echo "Servidor ObraPonto respondeu com sucesso"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs obraponto-teste
+          exit 1
