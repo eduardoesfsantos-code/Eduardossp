@@ -261,12 +261,13 @@ app.patch('/api/admin/requests/:id',auth,admin,wrap((req,res)=>{
 
 const dist=path.join(here,'web','dist');
 if(fs.existsSync(dist)){
- // Evita redirecionamento circular: serve /admin/ e /funcionario/ nas rotas explícitas abaixo.
+ // Rotas dos paineis ANTES do middleware de arquivos estáticos, evitando
+ // redirecionamentos automáticos de diretórios. Nenhum 301/302 é necessário.
+ const sendAdmin=(_req,res)=>res.sendFile(path.join(dist,'admin','index.html'));
+ const sendWorker=(_req,res)=>res.sendFile(path.join(dist,'funcionario','index.html'));
+ app.get(['/admin','/admin/','/admin/index.html'],sendAdmin);
+ app.get(['/funcionario','/funcionario/','/funcionario/index.html'],sendWorker);
  app.use(express.static(dist,{index:false,redirect:false}));
- app.get('/admin',(_req,res)=>res.redirect('/admin/'));
- app.get('/funcionario',(_req,res)=>res.redirect('/funcionario/'));
- app.get('/admin/',(_req,res)=>res.sendFile(path.join(dist,'admin/index.html')));
- app.get('/funcionario/',(_req,res)=>res.sendFile(path.join(dist,'funcionario/index.html')));
 }
 app.use((err,req,res,_next)=>{if((err.status||500)>=500)console.error(err);res.status(err.status||500).json({error:err.status?err.message:'Erro interno do servidor.'});});
 const port=Number(process.env.PORT)||3001;
