@@ -1,0 +1,9 @@
+.git
+**/node_modules
+**/.env
+**/data
+**/dist
+**/.gradle
+**/build
+**/*.apk
+*.zip

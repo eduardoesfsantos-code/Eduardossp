@@ -1,0 +1,25 @@
+OBRAPONTO PARA ANDROID — 2 APPS + 1 SERVIDOR
+
+PACOTE 1: ObraPonto_Empresa_Android = aplicativo do administrador.
+PACOTE 2: ObraPonto_Funcionario_Android = aplicativo do funcionário.
+PACOTE 3: ObraPonto_Servidor_Central = dados e sincronização dos dois.
+
+Ambos são projetos Android Studio DISTINTOS, com identificadores de pacote
+independentes, ícones e nomes próprios. Cada projeto gera seu próprio APK.
+
+IMPORTANTE: não há APK pronto neste arquivo. Não foi possível compilar
+porque o ambiente disponível não tem o Android SDK nem acesso para baixá-lo.
+Abra cada projeto no Android Studio e gere os APKs.
+
+Precisam de HTTPS em domínio configurado, com Node.js/Express e SQLite no backend.
+O app pode ser instalado no Android após a compilação, mas não funciona
+sozinho/offline e não sincroniza se o servidor não estiver publicado.
+
+Para usar sem compilar APK, o servidor oferece PWAs instaláveis distintas em:
+  https://SEU-DOMINIO/admin/
+  https://SEU-DOMINIO/funcionario/
+Abra cada URL no Chrome Android > menu > Instalar aplicativo.
+
+Atenção: sistema de ponto gerencial em estágio MVP, não homologado como REP-P
+nem apto a substituir automaticamente o registro oficial exigido por lei.
+Consulte README.md do servidor antes do uso trabalhista.

@@ -1,0 +1,18 @@
+SERVIDOR CENTRAL OBRAPONTO
+
+Este servidor é compartilhado pelos dois aplicativos Android.
+É o mesmo Node.js/Express + SQLite + Socket.IO do projeto original.
+
+Instalação em um servidor com Node.js 22 LTS ou mais novo:
+1. Execute: npm install
+2. Execute: npm run setup (define o administrador e gera o segredo)
+3. Execute: npm run build
+4. Execute: npm start
+5. Configure DNS e proxy HTTPS reverso apontando para a porta 3001.
+6. Confirme que https://SEU-DOMINIO/admin/ e
+   https://SEU-DOMINIO/funcionario/ abrem corretamente.
+7. Informe https://SEU-DOMINIO no primeiro acesso de CADA app Android.
+
+Leitura obrigatória: README.md (segurança, instalação, LGPD e limites legais).
+Não expor banco, .env ou porta de administração à internet sem proteção.
+Use HTTPS, backups e segredo forte.

@@ -1,0 +1,13 @@
+OBRAPONTO — INSTALACAO DOS DOIS APPS E SERVIDOR ONLINE
+
+1. ATENCAO: seu repositorio Eduardossp esta atualmente PUBLICO. Se quer preservar o codigo, mude para PRIVATE em Settings > General > Danger Zone > Change visibility.
+
+2. Envie esta pasta inteira (inclusive .github) para o GitHub. Windows: execute o script ENVIAR_PARA_GITHUB_WINDOWS.ps1 numa sessao PowerShell com Git autenticado. Mac/Linux: ./ENVIAR_PARA_GITHUB_MAC_LINUX.sh. NUNCA copie senhas para arquivos do GitHub.
+
+3. O workflow GitHub Actions inicia com o push para main. Apos concluido, baixe dois artefatos: ObraPonto-Empresa-APK e ObraPonto-Funcionario-APK. Os APKs devem ser testados; sao versoes DEBUG, nao distribuicao definitiva.
+
+4. Os dois apps solicitam um ENDERECO HTTPS do mesmo servidor. Sem isso, a tela do app abre mas nao se conecta ao sistema. Railway nao esta conectada ao ChatGPT neste momento.
+
+5. No Railway, novo projeto a partir do repo, Dockerfile root, configurar variables JWT_SECRET (min. 32 chars), ADMIN_EMAIL, ADMIN_PASSWORD (min. 12 chars), DB_PATH=/data/obraponto.sqlite, NODE_ENV=production; anexar volume /data; gerar URL publica HTTPS. As credenciais devem ficar apenas em Variables, jamais no GitHub.
+
+6. Teste /api/health, /admin/, /funcionario/ e o registro de ponto em dois celulares. Para jornada oficial de trabalho, revisar conformidade com Portaria 671 e LGPD.

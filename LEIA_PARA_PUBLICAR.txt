@@ -1,0 +1,41 @@
+OBRAPONTO — PREPARACAO PARA PUBLICAR E GERAR 2 APKs
+
+STATUS REAL: este ZIP contem CODIGO e AUTOMACAO DE COMPILACAO, NAO contem os dois APKs.
+O servidor tambem NAO foi hospedado e nenhum celular foi configurado.
+
+1) Para gerar os APKs SEM instalar Android Studio no seu PC:
+   - Criar um repositorio PRIVADO no GitHub.
+   - Enviar o CONTEUDO desta pasta como raiz do repositorio, incluindo a pasta oculta .github.
+   - Abrir Actions > Gerar APKs de teste do ObraPonto > Run workflow.
+   - Apos a execucao ter sucesso, baixar os dois artefatos APK na pagina do workflow.
+   - Sao APKs de TESTE, assinados automaticamente; para distribuir em producao, gerar
+     versoes RELEASE com chave propria e testes de seguranca.
+
+2) Para hospedar o servidor online em Railway:
+   - Criar uma conta Railway e um novo projeto a partir do mesmo repositorio do GitHub.
+   - Railway detectara o Dockerfile na raiz e construira o Node.js + frontends.
+   - Adicionar um VOLUME PERSISTENTE no servico, montado em: /data
+   - Configurar variaveis de ambiente na area segura Variables (NAO no codigo):
+       JWT_SECRET = gerar string aleatoria de 64+ caracteres
+       ADMIN_EMAIL = seu email para entrar como administrador
+       ADMIN_PASSWORD = sua senha forte de 12+ caracteres
+       ADMIN_NAME = Administrador
+       DB_PATH = /data/obraponto.sqlite
+       NODE_ENV = production
+   - Deploy e habilitar Generate Domain, que disponibilizara HTTPS.
+   - Testar https://SEU-ENDERECO/api/health (resposta JSON com status ok).
+   - Abrir https://SEU-ENDERECO/admin/ e /funcionario/
+   - Em AMBOS APKs, configurar o mesmo dominio HTTPS do Railway.
+   - No app Empresa, criar a obra e cada funcionario; no app Funcionario, fazer login.
+
+ATENCAO:
+   - A hospedagem pode gerar cobranca. Verifique limites e plano antes de ativar.
+   - Sem volume permanente, os dados em SQLite podem desaparecer em redeploy.
+   - Nunca envie senhas reais/segredos aos arquivos do GitHub ou para terceiros.
+   - Ative backups do banco e restrinja o acesso aos dados pessoais (LGPD).
+   - O ObraPonto e um MVP de controle GERENCIAL, ainda nao apto a substituir sozinho
+     um sistema legal de ponto (REP-P/Portaria 671) sem adaptacao e validacao.
+   - A compilacao no GitHub Actions e a implantacao no Railway ainda NAO foram executadas.
+
+Foi possivel verificar a sintaxe de server.js e setup.mjs no ambiente local,
+mas o build completo e os APKs exigem acesso a dependencias/SDK na nuvem.
