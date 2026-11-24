@@ -20,6 +20,17 @@ fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+db.pragma('busy_timeout = 10000');
+// Backup de transição criado antes de qualquer migração da V2.
+// A cópia fica no volume persistente; NÃO substitui backup externo.
+const legacySchema=db.pragma('table_info(users)').length>0 && db.pragma('table_info(company_profile)').length===0;
+if(legacySchema){
+ const backupDir=path.join(path.dirname(dbPath),'backups');
+ fs.mkdirSync(backupDir,{recursive:true,mode:0o700});
+ const backupFile=path.join(backupDir,`obraponto-antes-v2-${new Date().toISOString().replace(/[:.]/g,'-')}.sqlite`);
+ db.prepare('VACUUM INTO ?').run(backupFile);
+ console.log('Cópia de segurança pré-V2 criada no volume persistente.');
+}
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE COLLATE NOCASE,
