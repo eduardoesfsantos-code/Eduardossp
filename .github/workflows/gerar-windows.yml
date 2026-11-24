@@ -1,0 +1,30 @@
+name: Gerar aplicativo ObraPonto Empresa para Windows
+on:
+  push:
+    branches: [develop/obraponto-comercial-v2]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Compilar aplicativo Windows
+        shell: pwsh
+        run: dotnet publish windows/ObraPonto.Empresa.Windows.csproj -c Release -r win-x64 --self-contained true -o dist/windows
+      - name: Incluir orientacoes
+        shell: pwsh
+        run: Copy-Item windows/LEIA_ANTES_WINDOWS.txt dist/windows/LEIA_ANTES_WINDOWS.txt
+      - name: Disponibilizar Windows x64
+        uses: actions/upload-artifact@v4
+        with:
+          name: ObraPonto-Empresa-Windows-x64
+          path: dist/windows/**
+          if-no-files-found: error

@@ -11,6 +11,8 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import PDFDocument from 'pdfkit';
+import ExcelJS from 'exceljs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dbPath = path.resolve(here, process.env.DB_PATH || './data/obraponto.sqlite');
@@ -18,6 +20,17 @@ fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+db.pragma('busy_timeout = 10000');
+// Backup de transição criado antes de qualquer migração da V2.
+// A cópia fica no volume persistente; NÃO substitui backup externo.
+const legacySchema=db.pragma('table_info(users)').length>0 && db.pragma('table_info(company_profile)').length===0;
+if(legacySchema){
+ const backupDir=path.join(path.dirname(dbPath),'backups');
+ fs.mkdirSync(backupDir,{recursive:true,mode:0o700});
+ const backupFile=path.join(backupDir,`obraponto-antes-v2-${new Date().toISOString().replace(/[:.]/g,'-')}.sqlite`);
+ db.prepare('VACUUM INTO ?').run(backupFile);
+ console.log('Cópia de segurança pré-V2 criada no volume persistente.');
+}
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -50,8 +63,31 @@ CREATE TABLE IF NOT EXISTS audit (
  id TEXT PRIMARY KEY, actor_id TEXT REFERENCES users(id), action TEXT NOT NULL,
  object_id TEXT DEFAULT '', detail TEXT DEFAULT '', at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS company_profile (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ legal_name TEXT NOT NULL DEFAULT '',
+ trade_name TEXT NOT NULL DEFAULT '',
+ cnpj TEXT NOT NULL DEFAULT '',
+ contact_email TEXT NOT NULL DEFAULT '',
+ phone TEXT NOT NULL DEFAULT '',
+ address TEXT NOT NULL DEFAULT '',
+ logo_data_url TEXT NOT NULL DEFAULT '',
+ allow_worker_select_site INTEGER NOT NULL DEFAULT 1,
+ allow_worker_requests INTEGER NOT NULL DEFAULT 1,
+ workday_minutes INTEGER NOT NULL DEFAULT 480,
+ updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO company_profile (id,trade_name,updated_at) VALUES (1,'Minha empresa',CURRENT_TIMESTAMP);
 `);
 
+// Migração aditiva: não apaga dados nem registros de jornada existentes.
+if(!db.pragma('table_info(users)').some(c=>c.name==='archived_at')) {
+ db.exec('ALTER TABLE users ADD COLUMN archived_at TEXT');
+}
+const companyProfile=()=>{
+ const row=db.prepare('SELECT * FROM company_profile WHERE id=1').get();
+ return {...row,allow_worker_select_site:!!row.allow_worker_select_site,allow_worker_requests:!!row.allow_worker_requests};
+};
 const now = () => new Date().toISOString();
 const dateBR = (d = new Date()) => new Intl.DateTimeFormat('en-CA', {timeZone:'America/Sao_Paulo', year:'numeric', month:'2-digit', day:'2-digit'}).format(d);
 const today = () => dateBR();
@@ -61,7 +97,7 @@ const str = (value, max = 180) => typeof value === 'string' ? value.trim().slice
 const required = (value, label, max=180) => str(value,max) || fail(400, `${label} é obrigatório.`);
 const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(new Date(`${s}T12:00:00Z`).getTime());
 const dayParam = (v, fallback=today()) => {const s = str(v,10)||fallback; if(!isDate(s)) fail(400,'Data inválida.'); return s;};
-const safeUser = u => u && ({id:u.id,name:u.name,email:u.email,phone:u.phone,employee_code:u.employee_code,trade:u.trade,role:u.role,active:!!u.active,created_at:u.created_at});
+const safeUser = u => u && ({id:u.id,name:u.name,email:u.email,phone:u.phone,employee_code:u.employee_code,trade:u.trade,role:u.role,active:!!u.active,created_at:u.created_at,archived_at:u.archived_at||null});
 const audit = (actorId, action, objectId='', detail='') => db.prepare('INSERT INTO audit VALUES (?,?,?,?,?,?)').run(id(),actorId,action,objectId,String(detail).slice(0,500),now());
 const secret = process.env.JWT_SECRET;
 if (!secret || secret.length < 32 || secret.includes('SUBSTITUA')) {
@@ -84,7 +120,7 @@ if (!countAdmin) {
 const app = express();
 app.disable('x-powered-by');
 app.use(helmet({contentSecurityPolicy: false}));
-app.use(express.json({limit:'20kb'}));
+app.use(express.json({limit:'256kb'}));
 const http = createServer(app);
 const io = new Server(http, {cors:{origin:false}});
 
@@ -119,8 +155,30 @@ app.post('/api/login',rateLimit({windowMs:15*60*1000,limit:20,standardHeaders:'d
 app.get('/api/me',auth,(req,res)=>res.json({user:safeUser(req.user),today:today(),server_time:now()}));
 app.get('/api/sites',auth,(_req,res)=>res.json({sites:db.prepare('SELECT id,name,city,address,active,created_at FROM sites ORDER BY active DESC,name ASC').all().map(s=>({...s,active:!!s.active}))}));
 
+// V2: dados e preferências da empresa atual. Ainda não é multiempresa.
+app.get('/api/admin/company',auth,admin,(_req,res)=>res.json({company:companyProfile()}));
+app.patch('/api/admin/company',auth,admin,wrap((req,res)=>{
+ const current=companyProfile();
+ const field=(key,max)=>req.body[key]===undefined?current[key]:str(req.body[key],max);
+ const logo=req.body.logo_data_url===undefined?current.logo_data_url:req.body.logo_data_url;
+ if(logo && (typeof logo!=='string'||!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(logo)||Buffer.from(logo.split(',')[1]||'','base64').length>125000))fail(400,'Logo inválida. Use PNG, JPG ou WebP de até 125 KB.');
+ const email=field('contact_email',180);
+ if(email&&!/^\S+@\S+\.\S+$/.test(email))fail(400,'E-mail inválido.');
+ const cnpj=field('cnpj',22);
+ if(cnpj&&cnpj.replace(/\D/g,'').length!==14)fail(400,'Informe um CNPJ com 14 dígitos.');
+ const wd=req.body.workday_minutes===undefined?current.workday_minutes:Number(req.body.workday_minutes);
+ if(!Number.isInteger(wd)||wd<60||wd>900)fail(400,'Jornada de referência deve ficar entre 60 e 900 minutos.');
+ const pickBool=key=>req.body[key]===undefined?(current[key]?1:0):(req.body[key]===true?1:0);
+ db.prepare('UPDATE company_profile SET legal_name=?,trade_name=?,cnpj=?,contact_email=?,phone=?,address=?,logo_data_url=?,allow_worker_select_site=?,allow_worker_requests=?,workday_minutes=?,updated_at=? WHERE id=1').run(field('legal_name',150),field('trade_name',120),cnpj,email,field('phone',35),field('address',250),logo,pickBool('allow_worker_select_site'),pickBool('allow_worker_requests'),wd,now());
+ audit(req.user.id,'company_updated','1');changed('company');res.json({company:companyProfile()});
+}));
 // Admin: cadastros, alocação diária e relatórios
-app.get('/api/admin/workers',auth,admin,(_req,res)=>res.json({workers:db.prepare("SELECT id,name,email,phone,employee_code,trade,role,active,created_at FROM users WHERE role='worker' ORDER BY active DESC,name").all().map(safeUser)}));
+app.get('/api/admin/workers',auth,admin,(req,res)=>{
+ const query=req.query.include_archived==='1'
+  ? "SELECT * FROM users WHERE role='worker' ORDER BY (archived_at IS NOT NULL),active DESC,name"
+  : "SELECT * FROM users WHERE role='worker' AND archived_at IS NULL ORDER BY active DESC,name";
+ res.json({workers:db.prepare(query).all().map(safeUser)});
+});
 app.post('/api/admin/workers',auth,admin,wrap((req,res)=>{
  const name=required(req.body.name,'Nome'), email=required(req.body.email,'E-mail').toLowerCase();
  const password=req.body.password||''; if(!/^\S+@\S+\.\S+$/.test(email))fail(400,'E-mail inválido.');
@@ -132,14 +190,22 @@ app.post('/api/admin/workers',auth,admin,wrap((req,res)=>{
 }));
 app.patch('/api/admin/workers/:id',auth,admin,wrap((req,res)=>{
  const u=db.prepare("SELECT * FROM users WHERE id=? AND role='worker'").get(req.params.id);if(!u)fail(404,'Funcionário não encontrado.');
+ if(u.archived_at && req.body.restore!==true)fail(409,'Funcionário arquivado. Restaure-o antes de editar.');
  const name=req.body.name!==undefined?required(req.body.name,'Nome'):u.name;
  const email=req.body.email!==undefined?required(req.body.email,'E-mail').toLowerCase():u.email;
  if(!/^\S+@\S+\.\S+$/.test(email))fail(400,'E-mail inválido.');
  const active=req.body.active===undefined?u.active:(req.body.active?1:0);
  const pass=req.body.password ? bcrypt.hashSync(req.body.password,12) : u.password_hash;
  if(req.body.password && req.body.password.length<8)fail(400,'Senha deve ter no mínimo 8 caracteres.');
- try {db.prepare('UPDATE users SET name=?,email=?,phone=?,employee_code=?,trade=?,active=?,password_hash=? WHERE id=?').run(name,email,req.body.phone===undefined?u.phone:str(req.body.phone,30),req.body.employee_code===undefined?u.employee_code:str(req.body.employee_code,30),req.body.trade===undefined?u.trade:str(req.body.trade,90),active,pass,u.id);}catch(e){if(e.code?.includes('CONSTRAINT'))fail(409,'E-mail já cadastrado.');throw e;}
+ try {db.prepare('UPDATE users SET name=?,email=?,phone=?,employee_code=?,trade=?,active=?,password_hash=?,archived_at=? WHERE id=?').run(name,email,req.body.phone===undefined?u.phone:str(req.body.phone,30),req.body.employee_code===undefined?u.employee_code:str(req.body.employee_code,30),req.body.trade===undefined?u.trade:str(req.body.trade,90),active,pass,req.body.restore===true?null:u.archived_at,u.id);}catch(e){if(e.code?.includes('CONSTRAINT'))fail(409,'E-mail já cadastrado.');throw e;}
  audit(req.user.id,'worker_updated',u.id,name);changed('workers',u.id);res.json({ok:true});
+}));
+// Exclusão segura = arquivamento; acesso revogado, registros históricos preservados.
+app.delete('/api/admin/workers/:id',auth,admin,wrap((req,res)=>{
+ const u=db.prepare("SELECT id,archived_at FROM users WHERE id=? AND role='worker'").get(req.params.id);
+ if(!u)fail(404,'Funcionário não encontrado.');
+ if(!u.archived_at){db.prepare('UPDATE users SET active=0,archived_at=? WHERE id=?').run(now(),u.id);audit(req.user.id,'worker_archived',u.id);}
+ changed('workers',u.id);res.json({ok:true,archived:true});
 }));
 app.post('/api/admin/sites',auth,admin,wrap((req,res)=>{
  const name=required(req.body.name,'Nome da obra'),city=required(req.body.city,'Cidade');const sid=id();
@@ -175,6 +241,7 @@ app.get('/api/worker/today',auth,wrap((req,res)=>{
 }));
 app.put('/api/worker/site',auth,wrap((req,res)=>{
  if(req.user.role!=='worker')fail(403,'Somente funcionários.');
+ if(!companyProfile().allow_worker_select_site)fail(403,'Somente o administrador pode escolher a obra.');
  const siteId=str(req.body.site_id,40),day=today();
  if(!db.prepare('SELECT id FROM sites WHERE id=? AND active=1').get(siteId))fail(404,'Obra inválida.');
  setAssignment.run(req.user.id,day,siteId,req.user.id,now());audit(req.user.id,'worksite_selected',req.user.id,`${day} ${siteId}`);changed('assignments',req.user.id);res.json({ok:true});
@@ -222,6 +289,53 @@ function reportRows({from,to,workerId,siteId,allUsers=false}) {
  }
  rows.sort((a,b)=>b.day.localeCompare(a.day)||a.worker_name.localeCompare(b.worker_name));return rows;
 }
+// Exportação individual autenticada, inclusive para funcionários arquivados.
+app.get('/api/admin/report/export',auth,admin,wrap(async(req,res)=>{
+ const workerId=required(req.query.worker_id,'Funcionário',40);
+ const worker=db.prepare("SELECT id,name,trade,employee_code FROM users WHERE id=? AND role='worker'").get(workerId);
+ if(!worker)fail(404,'Funcionário não encontrado.');
+ const from=dayParam(req.query.from,new Date(Date.now()-30*86400000).toISOString().slice(0,10));
+ const to=dayParam(req.query.to);
+ if(from>to)fail(400,'Data inicial maior que final.');
+ const siteId=str(req.query.site_id,40),format=str(req.query.format,6).toLowerCase();
+ if(!['pdf','xlsx'].includes(format))fail(400,'Formato inválido. Escolha pdf ou xlsx.');
+ const rows=reportRows({from,to,workerId,siteId,allUsers:false});
+ const company=companyProfile();const name=company.trade_name||company.legal_name||'ObraPonto';
+ const stem=`obraponto_${workerId.slice(0,8)}_${from}_${to}`;
+ const total=rows.reduce((a,r)=>a+r.minutes,0);
+ if(format==='xlsx'){
+  const book=new ExcelJS.Workbook();book.creator='ObraPonto';book.created=new Date();
+  const sh=book.addWorksheet('Jornada individual');
+  sh.columns=[{width:15},{width:32},{width:30},{width:27},{width:19},{width:19},{width:17},{width:46}];
+  sh.addRow([name]);sh.addRow(['Relatório individual de funcionário']);
+  sh.addRow(['Funcionário',worker.name,'Matrícula',worker.employee_code||'—']);
+  sh.addRow(['Período',from+' a '+to]);sh.addRow([]);
+  const head=sh.addRow(['Data','Funcionário','Obra','Cidade','Situação','Horas decimais','Minutos','Marcações']);
+  head.font={bold:true,color:{argb:'FFFFFFFF'}};head.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF5145A0'}};
+  const hm=dt=>new Date(dt).toLocaleTimeString('pt-BR',{timeZone:'America/Sao_Paulo',hour:'2-digit',minute:'2-digit'});
+  for(const row of rows)sh.addRow([row.day,row.worker_name,row.site_name,row.site_city,row.status,Number((row.minutes/60).toFixed(2)),row.minutes,row.punches.map(p=>p.type+': '+hm(p.at)).join(' | ')]);
+  sh.addRow(['TOTAL','','','','',Number((total/60).toFixed(2)),total]);sh.getRow(sh.rowCount).font={bold:true};
+  sh.views=[{state:'frozen',ySplit:6}];
+  res.set('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.set('Content-Disposition',`attachment; filename="${stem}.xlsx"`);
+  res.send(Buffer.from(await book.xlsx.writeBuffer()));return;
+ }
+ const doc=new PDFDocument({size:'A4',margin:42});
+ res.set('Content-Type','application/pdf');res.set('Content-Disposition',`attachment; filename="${stem}.pdf"`);
+ doc.pipe(res);doc.fontSize(17).font('Helvetica-Bold').text(name);
+ doc.moveDown(0.4).fontSize(13).text('Relatório individual de jornada');
+ doc.moveDown(0.5).font('Helvetica').fontSize(10).text('Funcionário: '+worker.name);
+ doc.text('Matrícula: '+(worker.employee_code||'—')+'   Período: '+from+' a '+to);
+ doc.moveDown().font('Helvetica-Bold').fontSize(10).text('Data | Obra / cidade | Status | Horas');
+ doc.moveDown(0.4).font('Helvetica').fontSize(9);
+ for(const row of rows){if(doc.y>740)doc.addPage();
+  doc.text(`${row.day} | ${row.site_name}, ${row.site_city} | ${row.status} | ${Math.floor(row.minutes/60)}h${String(row.minutes%60).padStart(2,'0')}`,{width:510});
+  doc.moveDown(0.25);}
+ if(!rows.length)doc.text('Nenhum registro no período.');
+ doc.moveDown().font('Helvetica-Bold').text('Total: '+(total/60).toFixed(2)+' horas');
+ doc.moveDown().font('Helvetica').fontSize(8).text('Relatório operacional. Não substitui documentos fiscais exigidos pela legislação trabalhista.');
+ doc.end();
+}));
 app.get('/api/worker/history',auth,wrap((req,res)=>{
  if(req.user.role!=='worker')fail(403,'Somente funcionários.');
  const from=dayParam(req.query.from,new Date(Date.now()-30*86400000).toISOString().slice(0,10)),to=dayParam(req.query.to);
@@ -244,6 +358,7 @@ app.get('/api/admin/dashboard',auth,admin,wrap((_req,res)=>{
 
 app.post('/api/worker/requests',auth,wrap((req,res)=>{
  if(req.user.role!=='worker')fail(403,'Somente funcionários.');
+ if(!companyProfile().allow_worker_requests)fail(403,'Novas solicitações estão desativadas.');
  const day=dayParam(req.body.day),message=required(req.body.message,'Justificativa',500);
  const rid=id();db.prepare('INSERT INTO requests (id,user_id,day,message,status,created_at) VALUES (?,?,?,?,?,?)').run(rid,req.user.id,day,message,'pending',now());audit(req.user.id,'correction_requested',rid,day);changed('requests',req.user.id);res.status(201).json({id:rid});
 }));
@@ -261,8 +376,6 @@ app.patch('/api/admin/requests/:id',auth,admin,wrap((req,res)=>{
 
 const dist=path.join(here,'web','dist');
 if(fs.existsSync(dist)){
- // Rotas dos paineis ANTES do middleware de arquivos estáticos, evitando
- // redirecionamentos automáticos de diretórios. Nenhum 301/302 é necessário.
  const sendAdmin=(_req,res)=>res.sendFile(path.join(dist,'admin','index.html'));
  const sendWorker=(_req,res)=>res.sendFile(path.join(dist,'funcionario','index.html'));
  app.get(['/admin','/admin/','/admin/index.html'],sendAdmin);
