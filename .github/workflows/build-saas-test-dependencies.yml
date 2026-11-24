@@ -1,0 +1,29 @@
+name: Compilar dependências Node para testes privados do ObraPonto SaaS
+on:
+  push:
+    branches: [feature/obraponto-saas-isolado]
+permissions:
+  contents: read
+jobs:
+  deps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Instalar somente dependências Node do backend SaaS
+        shell: bash
+        run: |
+          mkdir -p saas-ci-deps
+          cd saas-ci-deps
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund --omit=dev bcryptjs@^3 better-sqlite3@^12 dotenv@^16 express@^4 express-rate-limit@^8 helmet@^8 jsonwebtoken@^9 socket.io@^4 exceljs@^4 pdfkit@^0.17
+          tar -czf ../saas-node-deps-linux.tar.gz node_modules
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deps-node22-para-testes-saas
+          path: saas-node-deps-linux.tar.gz
+          retention-days: 1
+          if-no-files-found: error
