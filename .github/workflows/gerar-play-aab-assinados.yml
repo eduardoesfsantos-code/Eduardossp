@@ -3,6 +3,8 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+env:
+  OBRAPONTO_SAAS_BASE_URL: ${{ vars.OBRAPONTO_SAAS_BASE_URL }}
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -26,6 +28,13 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
+      - name: Verificar destino comercial antes de assinar
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$OBRAPONTO_SAAS_BASE_URL" || { echo "Configure a variável de repositório OBRAPONTO_SAAS_BASE_URL"; exit 1; }
+          [[ "$OBRAPONTO_SAAS_BASE_URL" == https://* ]] || { echo "Domínio SaaS deve usar HTTPS"; exit 1; }
+          [[ "$OBRAPONTO_SAAS_BASE_URL" != *obraponto-servidor-production.up.railway.app* ]] || { echo "Não publique apontando para o servidor legado monoempresa"; exit 1; }
       - name: Preparar chaves privadas de upload
         shell: bash
         env:
