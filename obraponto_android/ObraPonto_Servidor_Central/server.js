@@ -119,6 +119,7 @@ if (!countAdmin) {
 
 const app = express();
 app.disable('x-powered-by');
+app.set('trust proxy',1); // Railway encaminha IP de origem por proxy.
 app.use(helmet({contentSecurityPolicy: false}));
 app.use(express.json({limit:'256kb'}));
 const http = createServer(app);
@@ -320,20 +321,45 @@ app.get('/api/admin/report/export',auth,admin,wrap(async(req,res)=>{
   res.set('Content-Disposition',`attachment; filename="${stem}.xlsx"`);
   res.send(Buffer.from(await book.xlsx.writeBuffer()));return;
  }
- const doc=new PDFDocument({size:'A4',margin:42});
- res.set('Content-Type','application/pdf');res.set('Content-Disposition',`attachment; filename="${stem}.pdf"`);
- doc.pipe(res);doc.fontSize(17).font('Helvetica-Bold').text(name);
- doc.moveDown(0.4).fontSize(13).text('Relatório individual de jornada');
- doc.moveDown(0.5).font('Helvetica').fontSize(10).text('Funcionário: '+worker.name);
- doc.text('Matrícula: '+(worker.employee_code||'—')+'   Período: '+from+' a '+to);
- doc.moveDown().font('Helvetica-Bold').fontSize(10).text('Data | Obra / cidade | Status | Horas');
- doc.moveDown(0.4).font('Helvetica').fontSize(9);
- for(const row of rows){if(doc.y>740)doc.addPage();
-  doc.text(`${row.day} | ${row.site_name}, ${row.site_city} | ${row.status} | ${Math.floor(row.minutes/60)}h${String(row.minutes%60).padStart(2,'0')}`,{width:510});
-  doc.moveDown(0.25);}
- if(!rows.length)doc.text('Nenhum registro no período.');
- doc.moveDown().font('Helvetica-Bold').text('Total: '+(total/60).toFixed(2)+' horas');
- doc.moveDown().font('Helvetica').fontSize(8).text('Relatório operacional. Não substitui documentos fiscais exigidos pela legislação trabalhista.');
+ const doc=new PDFDocument({size:'A4',margin:40,info:{Title:'Relatório individual de jornada - ObraPonto',Author:name}});
+ res.set('Content-Type','application/pdf');
+ res.set('Content-Disposition',`attachment; filename="${stem}.pdf"`);
+ res.set('Cache-Control','private, no-store');
+ doc.pipe(res);
+ const fmtDate=day=>day.split('-').reverse().join('/');
+ const fmtTime=ts=>new Date(ts).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',timeZone:'America/Sao_Paulo'});
+ const fmtHours=minutes=>`${Math.floor(minutes/60)}h${String(minutes%60).padStart(2,'0')}`;
+ const formatPunches=row=>{
+  const titles={in:'Entrada',break_start:'Início intervalo',break_end:'Fim intervalo',out:'Saída'};
+  return row.punches.map(p=>`${titles[p.type]||p.type}: ${fmtTime(p.at)}`).join('  |  ')||'Sem marcação';
+ };
+ const rule=()=>{
+  doc.moveDown(0.2);
+  const yy=doc.y;doc.strokeColor('#E0E4EA').moveTo(40,yy).lineTo(555,yy).stroke();
+  doc.moveDown(0.45);
+ };
+ doc.fillColor('#2C3450').font('Helvetica-Bold').fontSize(18).text(name,{width:515});
+ doc.moveDown(0.25).fontSize(13).text('Relatório individual de jornada');
+ doc.moveDown(0.5).font('Helvetica').fontSize(9);
+ if(company.legal_name)doc.text('Razão social: '+company.legal_name);
+ if(company.cnpj)doc.text('CNPJ: '+company.cnpj);
+ doc.text('Funcionário: '+worker.name);
+ doc.text('Matrícula: '+(worker.employee_code||'—')+'   Função: '+(worker.trade||'—'));
+ doc.text('Período: '+fmtDate(from)+' a '+fmtDate(to));
+ doc.text('Total trabalhado no período: '+fmtHours(total));
+ rule();
+ if(!rows.length)doc.fontSize(10).fillColor('#555').text('Nenhum registro de jornada encontrado no período selecionado.');
+ for(const row of rows){
+  if(doc.y>682){doc.addPage();doc.fillColor('#2C3450').font('Helvetica-Bold').fontSize(10).text(name+' — Continuação do relatório');rule();}
+  doc.fillColor('#2C3450').font('Helvetica-Bold').fontSize(10).text(fmtDate(row.day)+'    '+fmtHours(row.minutes)+'    '+row.status);
+  doc.font('Helvetica').fontSize(9).fillColor('#48546B').text('Obra: '+row.site_name+' — '+row.site_city,{width:515});
+  doc.fontSize(8.5).fillColor('#5D687A').text(formatPunches(row),{width:515});
+  rule();
+ }
+ if(doc.y>690)doc.addPage();
+ doc.moveDown(0.3).fillColor('#1F2B44').font('Helvetica-Bold').fontSize(12).text('TOTAL: '+fmtHours(total));
+ doc.moveDown(0.8).font('Helvetica').fontSize(8).fillColor('#6A7080')
+  .text('Horários no fuso de São Paulo. Relatório operacional para consulta e impressão; não substitui AFD, AEJ ou documentos fiscais exigidos pela legislação trabalhista.');
  doc.end();
 }));
 app.get('/api/worker/history',auth,wrap((req,res)=>{
@@ -366,7 +392,7 @@ app.get('/api/worker/requests',auth,wrap((req,res)=>{
  if(req.user.role!=='worker')fail(403,'Somente funcionários.');
  res.json({requests:db.prepare('SELECT * FROM requests WHERE user_id=? ORDER BY created_at DESC LIMIT 30').all(req.user.id)});
 }));
-app.get('/api/admin/requests',auth,admin,(_req,res)=>res.json({requests:db.prepare('SELECT r.*,u.name AS worker_name FROM requests r JOIN users u ON r.user_id=u.id ORDER BY (r.status="pending") DESC,r.created_at DESC LIMIT 100').all()}));
+app.get('/api/admin/requests',auth,admin,(_req,res)=>res.json({requests:db.prepare('SELECT r.*,u.name AS worker_name FROM requests r JOIN users u ON r.user_id=u.id ORDER BY (r.status=\'pending\') DESC,r.created_at DESC LIMIT 100').all()}));
 app.patch('/api/admin/requests/:id',auth,admin,wrap((req,res)=>{
  const r=db.prepare('SELECT * FROM requests WHERE id=?').get(req.params.id);if(!r)fail(404,'Solicitação não encontrada.');
  const status=str(req.body.status);if(!['reviewed','rejected'].includes(status))fail(400,'Status inválido.');
