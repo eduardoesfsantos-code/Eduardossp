@@ -259,8 +259,9 @@ public class MainActivity extends Activity {
                 pendingCsv=dataUrl;
                 Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);
                 i.addCategory(Intent.CATEGORY_OPENABLE);
-                i.setType("text/csv");
                 String sanitized=(name==null?"relatorio-obraponto.csv":name).replaceAll("[^a-zA-Z0-9._-]","_");
+                String ext=sanitized.toLowerCase(Locale.ROOT);
+                i.setType(ext.endsWith(".pdf")?"application/pdf":ext.endsWith(".xlsx")?"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":"text/csv");
                 i.putExtra(Intent.EXTRA_TITLE,sanitized);
                 try {startActivityForResult(i,SAVE_CSV);} catch(Exception e){Toast.makeText(MainActivity.this,"Não foi possível abrir o salvamento",Toast.LENGTH_LONG).show();}
             });
