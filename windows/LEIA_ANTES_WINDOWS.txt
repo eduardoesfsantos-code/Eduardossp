@@ -1,0 +1,15 @@
+OBRAPONTO EMPRESA — WINDOWS (VERSÃO DE TESTE 1.1.0)
+
+1. Extraia todos os arquivos deste ZIP em uma pasta.
+2. Abra ObraPonto.Empresa.Windows.exe.
+3. Faça login com os dados da administração de sua empresa.
+4. É necessária conexão com a Internet e Microsoft Edge WebView2 Runtime.
+
+Servidor padrão:
+https://obraponto-servidor-production.up.railway.app
+
+Este é um programa para acesso ao painel web que atualmente suporta UMA empresa.
+Não é um produto comercial multiempresa e não deve ser vendido como controle
+oficial de ponto sem adequações legais e de segurança.
+
+Sua senha nunca vem embutida neste instalador.
