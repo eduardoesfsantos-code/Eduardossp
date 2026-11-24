@@ -2,6 +2,8 @@ name: Gerar aplicativo ObraPonto Empresa para Windows
 on:
   push:
     branches: [develop/obraponto-comercial-v2]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read
