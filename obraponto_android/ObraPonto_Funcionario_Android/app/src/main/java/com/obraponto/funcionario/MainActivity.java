@@ -44,6 +44,7 @@ import org.json.JSONObject;
 public class MainActivity extends Activity {
     private static final String PREFS = "obraponto_mobile_prefs";
     private static final String SERVER_KEY = "server_origin";
+    private static final String DEFAULT_ORIGIN = "https://obraponto-servidor-production.up.railway.app";
     private static final int SAVE_CSV = 4096;
     private static final int NAVY = Color.rgb(10, 17, 35);
     private static final int CARD = Color.rgb(20, 32, 58);
@@ -77,7 +78,7 @@ public class MainActivity extends Activity {
         return l;
     }
     private String settingsOrigin() {
-        return getSharedPreferences(PREFS, MODE_PRIVATE).getString(SERVER_KEY, "");
+        return getSharedPreferences(PREFS, MODE_PRIVATE).getString(SERVER_KEY, DEFAULT_ORIGIN);
     }
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
