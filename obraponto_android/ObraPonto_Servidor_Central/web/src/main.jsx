@@ -1,4 +1,4 @@
-import React, {useEffect,useState,useMemo} from 'react';
+import React, {useEffect,useState,useMemo,useRef} from 'react';
 import {createRoot} from 'react-dom/client';
 import {io} from 'socket.io-client';
 import {
@@ -9,7 +9,7 @@ import {
  TrendingUp, CircleDot, RefreshCcw, CalendarClock, X, Menu,
  HardHat, Clock4, Coffee, DoorOpen, Timer, Send, Save, Search,
  UserRound, Wifi, WifiOff, Sun, CalendarCheck, ArrowUpRight, FileText,
- CircleCheck, SquarePen, LockKeyhole, Info, SlidersHorizontal, MoveRight, Trash2, FileSpreadsheet, FileDown, Settings, ImagePlus
+ CircleCheck, SquarePen, LockKeyhole, Info, SlidersHorizontal, MoveRight, Trash2, FileSpreadsheet, Printer, FileDown, Settings, ImagePlus
 } from 'lucide-react';
 import './style.css';
 
@@ -110,13 +110,39 @@ function Assignments({requester,refresh,notify}){
  return <><SectionHead eyebrow="PLANEJAMENTO DIÁRIO" title="Alocação de equipes" description="Defina a obra de cada profissional para qualquer dia. O local pode mudar diariamente."/><div className="assign-layout"><div className="panel assign-form-panel"><div className="panel-heading"><div><h3>Definir local de trabalho</h3><p>Vincule um funcionário a uma obra</p></div><div className="round-icon"><CalendarCheck size={20}/></div></div><form className="stack-form" onSubmit={submit}><Field label="Data de trabalho"><TextInput type="date" required value={day} onChange={e=>setDay(e.target.value)}/></Field><Field label="Funcionário"><Select required value={workerId} onChange={e=>setWorkerId(e.target.value)}><option value="">Selecione um profissional</option>{workers.map(w=><option key={w.id} value={w.id}>{w.name} • {w.trade||'Equipe'}</option>)}</Select></Field><Field label="Obra / local"><Select required value={siteId} onChange={e=>setSiteId(e.target.value)}><option value="">Selecione uma obra</option>{sites.map(s=><option key={s.id} value={s.id}>{s.name} — {s.city}</option>)}</Select></Field><Primary type="submit" disabled={!workerId||!siteId||busy} icon={CalendarCheck}>{busy?'Salvando...':'Salvar alocação'}</Primary></form><p className="micro-note"><Info size={15}/> O funcionário também pode alterar a obra do dia em seu aplicativo; a mudança fica registrada.</p></div><div className="panel"><div className="panel-heading"><div><h3>Escala para {shortDate(day)}</h3><p>{assignments.length} alocações definidas</p></div><Pill text="Atualização ao vivo" tone="success"/></div>{loading&&!data?<Spinner/>:<div className="assignment-list">{assignments.length?assignments.map(a=><div key={a.worker_id} className="assign-row"><Avatar name={a.worker_name}/><div className="assign-person"><b>{a.worker_name}</b><small><MapPin size={13}/>{a.site_name}, {a.site_city}</small></div><Pill text="Definido" tone="blue" icon={CheckCircle2}/></div>):<Empty icon={CalendarDays} title="Nenhuma obra alocada" description="Selecione um funcionário e um local no formulário ao lado."/>}</div>}</div></div></>;
 }
 function exportCsv(rows){const cols=[['day','Data'],['worker_name','Funcionário'],['trade','Função'],['employee_code','Matrícula'],['site_name','Obra'],['site_city','Cidade'],['status','Situação'],['minutes','Minutos trabalhados']];const esc=value=>{let s=String(value??'');if(/^[=+@\-]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';};const csv='\uFEFF'+[cols.map(c=>esc(c[1])).join(';'),...rows.map(r=>cols.map(([key])=>esc(r[key])).join(';'))].join('\r\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=`obraponto_relatorio_${dayToday()}.csv`;if(window.ObraPontoAndroid?.saveCsv){const reader=new FileReader();reader.onload=()=>window.ObraPontoAndroid.saveCsv(String(reader.result),link.download);reader.readAsDataURL(blob);URL.revokeObjectURL(url);}else{link.click();URL.revokeObjectURL(url);}}
-async function exportIndividualReport({from,to,workerId,siteId,format}){
- if(!workerId)throw Error('Selecione um funcionário para gerar o relatório individual.');
+async function fetchIndividualReport({from,to,workerId,siteId,format}){
+ if(!workerId)throw Error('Primeiro selecione um funcionário no filtro do relatório.');
+ if(!from||!to||from>to)throw Error('Confira as datas inicial e final.');
  const query=new URLSearchParams({from,to,worker_id:workerId,format});if(siteId)query.set('site_id',siteId);
- const response=await fetch('/api/admin/report/export?'+query.toString(),{headers:{Authorization:`Bearer ${localStorage.getItem(APP_KEY)||''}`}});
+ const response=await fetch('/api/admin/report/export?'+query.toString(),{headers:{Authorization:`Bearer ${localStorage.getItem(APP_KEY)||''}`},cache:'no-store'});
  if(!response.ok){const error=await response.json().catch(()=>({}));throw Error(error.error||'Falha ao gerar relatório.');}
- const blob=await response.blob();const url=URL.createObjectURL(blob),link=document.createElement('a');
- link.href=url;link.download=`obraponto_individual_${from}_${to}.${format}`;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),120000);
+ const blob=await response.blob();
+ const expected=format==='pdf'?'application/pdf':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+ if(!blob.size || !response.headers.get('content-type')?.includes(expected))throw Error('O servidor não retornou um arquivo válido.');
+ return {blob,name:`obraponto_individual_${from}_${to}.${format}`};
+}
+function blobDataUrl(blob){return new Promise((resolve,reject)=>{
+ const r=new FileReader();r.onload=()=>resolve(String(r.result));r.onerror=()=>reject(Error('Não foi possível preparar o arquivo.'));r.readAsDataURL(blob);
+});}
+async function saveReportFile({blob,name}){
+ if(window.ObraPontoAndroid?.saveCsv){
+  // Ponte nativa: abre o seletor de arquivos do Android (PDF, Excel ou CSV).
+  const dataUrl=await blobDataUrl(blob);window.ObraPontoAndroid.saveCsv(dataUrl,name);return;
+ }
+ const url=URL.createObjectURL(blob),link=document.createElement('a');
+ link.href=url;link.download=name;document.body.append(link);link.click();link.remove();
+ setTimeout(()=>URL.revokeObjectURL(url),60000);
+}
+function PdfPrintPreview({pdf,onClose,notify}){
+ const frame=useRef(null);
+ const print=()=>{
+  try{
+   const target=frame.current?.contentWindow;
+   if(!target)throw Error('Prévia não disponível');
+   target.focus();target.print();
+  }catch(e){notify('Não foi possível abrir a impressão. Use o ícone de imprimir na prévia do PDF.');}
+ };
+ return <Modal title="Visualizar e imprimir PDF" subtitle={pdf.name} onClose={onClose}><div className="pdf-preview"><iframe title="Prévia do relatório individual em PDF" ref={frame} src={pdf.url}/><div className="pdf-preview-actions"><Primary variant="btn-light" icon={Download} onClick={async()=>{try{await saveReportFile(pdf);notify('Download do PDF solicitado.');}catch(e){notify(e.message);}}}>Salvar PDF</Primary><Primary icon={Printer} onClick={print}>Imprimir</Primary></div><p className="micro-note">Confira o documento e use Imprimir para selecionar sua impressora ou salvar como PDF.</p></div></Modal>;
 }
 function CompanyPage({requester,refresh,notify}){
  const {data,loading}=useRecords(requester,['/admin/company'],refresh),[form,setForm]=useState(null),[busy,setBusy]=useState(false);
@@ -137,9 +163,60 @@ function SettingsPage({requester,refresh,notify}){
 }
 function Reports({requester,refresh,notify}){
  const [from,setFrom]=useState(daysAgo(14)),[to,setTo]=useState(dayToday()),[workerId,setWorkerId]=useState(''),[siteId,setSiteId]=useState('');
- const keys=['/admin/workers','/sites',`/admin/report?from=${from}&to=${to}${workerId?'&worker_id='+encodeURIComponent(workerId):''}${siteId?'&site_id='+encodeURIComponent(siteId):''}`];const {data,loading}=useRecords(requester,keys,refresh);const workers=data?.[0]?.workers||[],sites=data?.[1]?.sites||[],rows=data?.[2]?.rows||[];
+ const [busy,setBusy]=useState(''),[pdf,setPdf]=useState(null);
+ const keys=['/admin/workers','/sites',`/admin/report?from=${from}&to=${to}${workerId?'&worker_id='+encodeURIComponent(workerId):''}${siteId?'&site_id='+encodeURIComponent(siteId):''}`];
+ const {data,loading}=useRecords(requester,keys,refresh);
+ const workers=data?.[0]?.workers||[],sites=data?.[1]?.sites||[],rows=data?.[2]?.rows||[];
  const total=rows.reduce((n,r)=>n+r.minutes,0);
- return <><SectionHead eyebrow="INTELIGÊNCIA OPERACIONAL" title="Relatórios de ponto" description="Consulte horas trabalhadas por período, profissional, obra e cidade." action={<div className="export-buttons"><Primary variant="btn-light" icon={Download} disabled={!rows.length} onClick={()=>{exportCsv(rows);notify('CSV exportado.');}}>CSV</Primary><Primary icon={FileDown} disabled={!workerId} onClick={async()=>{try{await exportIndividualReport({from,to,workerId,siteId,format:'pdf'});notify('PDF gerado.');}catch(e){notify(e.message);}}}>PDF individual</Primary><Primary icon={FileSpreadsheet} disabled={!workerId} onClick={async()=>{try{await exportIndividualReport({from,to,workerId,siteId,format:'xlsx'});notify('Excel gerado.');}catch(e){notify(e.message);}}}>Excel individual</Primary></div>}/><div className="filters-panel panel"><div className="filters-title"><SlidersHorizontal size={19}/><b>Filtros do relatório</b></div><div className="filter-grid"><Field label="De"><TextInput type="date" value={from} onChange={e=>setFrom(e.target.value)}/></Field><Field label="Até"><TextInput type="date" value={to} onChange={e=>setTo(e.target.value)}/></Field><Field label="Funcionário"><Select value={workerId} onChange={e=>setWorkerId(e.target.value)}><option value="">Todos</option>{workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field><Field label="Obra"><Select value={siteId} onChange={e=>setSiteId(e.target.value)}><option value="">Todas as obras</option>{sites.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</Select></Field></div></div><div className="report-stats"><div><span>Total de horas</span><strong>{fmtHours(total)}</strong></div><div><span>Dias com alocação / registro</span><strong>{rows.length}</strong></div><div><span>Profissionais no período</span><strong>{new Set(rows.map(r=>r.worker_id)).size}</strong></div></div><div className="panel table-panel"><div className="panel-heading"><div><h3>Jornadas detalhadas</h3><p>Horas calculadas descontando os intervalos registrados</p></div><Pill text={`${rows.length} registros`}/></div>{loading&&!data?<Spinner/>:<div className="table-scroll"><table><thead><tr><th>DATA</th><th>FUNCIONÁRIO</th><th>OBRA / CIDADE</th><th>MARCAÇÕES</th><th>STATUS</th><th>HORAS</th></tr></thead><tbody>{rows.length?rows.map(r=><tr key={r.worker_id+r.day}><td>{shortDate(r.day)}</td><td><div className="two-line"><b>{r.worker_name}</b><small>{r.trade||'—'}</small></div></td><td><div className="two-line"><b>{r.site_name}</b><small>{r.site_city}</small></div></td><td className="punch-times">{r.punches.length?r.punches.map(p=><span title={labels[p.type]} key={p.id}>{displayTime(p.at)}</span>):'—'}</td><td>{statusPill(r.status)}</td><td className="metric-cell">{fmtHours(r.minutes)}</td></tr>):<tr><td colSpan="6"><Empty icon={ChartColumnIncreasing} title="Sem dados para o período" description="Altere os filtros ou aguarde novas marcações."/></td></tr>}</tbody></table></div>}</div><p className="micro-note"><Info size={15}/> Os horários são mostrados no fuso de São Paulo. Marcações originais não são alteradas; relatórios operacionais não equivalem aos arquivos fiscais AFD/AEJ.</p></>;
+ useEffect(()=>()=>{if(pdf?.url)URL.revokeObjectURL(pdf.url);},[pdf?.url]);
+ const generate=async(format,print=false)=>{
+  if(busy)return;
+  if(!workerId){notify('Selecione primeiro um funcionário para gerar o relatório individual.');return;}
+  setBusy(print?'print':format);
+  try{
+   const report=await fetchIndividualReport({from,to,workerId,siteId,format});
+   if(print){
+    if(window.ObraPontoAndroid?.printPdf){
+     const dataUrl=await blobDataUrl(report.blob);
+     window.ObraPontoAndroid.printPdf(dataUrl,report.name);
+     notify('Selecione uma impressora ou Salvar como PDF.');
+    }else if(window.ObraPontoAndroid){
+     await saveReportFile(report);
+     notify('PDF pronto. Para impressão direta, atualize o aplicativo Empresa para a versão 1.1.1.');
+    }else{
+     setPdf({...report,url:URL.createObjectURL(report.blob)});
+    }
+   }else{
+    await saveReportFile(report);
+    notify(window.ObraPontoAndroid?'Escolha onde salvar o arquivo.':'Download do arquivo solicitado.');
+   }
+  }catch(e){notify(e.message);}finally{setBusy('');}
+ };
+ return <>
+ <SectionHead eyebrow="INTELIGÊNCIA OPERACIONAL" title="Relatórios de ponto"
+ description="Escolha o funcionário e as datas. Gere um PDF para imprimir ou um Excel para editar."
+ action={<div className="export-buttons">
+  <Primary variant="btn-light" icon={Download} disabled={busy!==''||!rows.length} onClick={()=>{exportCsv(rows);notify('CSV exportado.');}}>CSV</Primary>
+  <Primary icon={FileDown} disabled={busy!==''} onClick={()=>generate('pdf')}>{busy==='pdf'?'Gerando...':'Baixar PDF'}</Primary>
+  <Primary icon={Printer} disabled={busy!==''} onClick={()=>generate('pdf',true)}>{busy==='print'?'Preparando...':'Visualizar / Imprimir'}</Primary>
+  <Primary icon={FileSpreadsheet} disabled={busy!==''} onClick={()=>generate('xlsx')}>{busy==='xlsx'?'Gerando...':'Excel individual'}</Primary>
+ </div>}/>
+ <div className="filters-panel panel">
+  <div className="filters-title"><SlidersHorizontal size={19}/><b>Filtros do relatório</b></div>
+  <div className="filter-grid">
+   <Field label="De"><TextInput type="date" value={from} onChange={e=>setFrom(e.target.value)}/></Field>
+   <Field label="Até"><TextInput type="date" value={to} onChange={e=>setTo(e.target.value)}/></Field>
+   <Field label="Funcionário *"><Select value={workerId} onChange={e=>setWorkerId(e.target.value)}><option value="">Selecione para gerar PDF ou Excel</option>{workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</Select></Field>
+   <Field label="Obra"><Select value={siteId} onChange={e=>setSiteId(e.target.value)}><option value="">Todas as obras</option>{sites.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</Select></Field>
+  </div>
+  {!workerId&&<p className="report-help"><Info size={16}/> Para gerar um relatório individual, selecione o funcionário acima.</p>}
+ </div>
+ <div className="report-stats"><div><span>Total de horas</span><strong>{fmtHours(total)}</strong></div><div><span>Dias com alocação / registro</span><strong>{rows.length}</strong></div><div><span>Profissionais no período</span><strong>{new Set(rows.map(r=>r.worker_id)).size}</strong></div></div>
+ <div className="panel table-panel"><div className="panel-heading"><div><h3>Jornadas detalhadas</h3><p>Horas calculadas descontando os intervalos registrados</p></div><Pill text={`${rows.length} registros`}/></div>
+ {loading&&!data?<Spinner/>:<div className="table-scroll"><table><thead><tr><th>DATA</th><th>FUNCIONÁRIO</th><th>OBRA / CIDADE</th><th>MARCAÇÕES</th><th>STATUS</th><th>HORAS</th></tr></thead><tbody>{rows.length?rows.map(r=><tr key={r.worker_id+r.day}><td>{shortDate(r.day)}</td><td><div className="two-line"><b>{r.worker_name}</b><small>{r.trade||'—'}</small></div></td><td><div className="two-line"><b>{r.site_name}</b><small>{r.site_city}</small></div></td><td className="punch-times">{r.punches.length?r.punches.map(p=><span title={labels[p.type]} key={p.id}>{displayTime(p.at)}</span>):'—'}</td><td>{statusPill(r.status)}</td><td className="metric-cell">{fmtHours(r.minutes)}</td></tr>):<tr><td colSpan="6"><Empty icon={ChartColumnIncreasing} title="Sem dados para o período" description="Altere os filtros ou aguarde novas marcações."/></td></tr>}</tbody></table></div>}</div>
+ <p className="micro-note"><Info size={15}/> Os horários são mostrados no fuso de São Paulo. Relatórios operacionais não equivalem aos arquivos fiscais AFD/AEJ.</p>
+ {pdf&&<PdfPrintPreview pdf={pdf} onClose={()=>setPdf(null)} notify={notify}/>}
+ </>;
 }
 function AdminRequests({requester,refresh,notify}){
  const {data,loading}=useRecords(requester,['/admin/requests'],refresh);const items=data?.[0]?.requests||[];const [busy,setBusy]=useState('');
