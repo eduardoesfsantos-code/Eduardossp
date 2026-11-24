@@ -15,3 +15,13 @@
 
 /* Recursos empresariais da V2 */
 .export-buttons,.staff-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.delete-link{color:#c24551!important}.archive-toggle{display:flex;align-items:center;gap:7px;color:#68748e;font-size:12px;cursor:pointer}.company-panel{padding:24px;max-width:920px}.company-panel .stack-form{max-width:800px}.company-logo-editor{display:flex;gap:24px;align-items:center;border:1px dashed #d9daee;background:#fafaff;border-radius:15px;padding:22px;flex-wrap:wrap}.company-logo-editor img{max-width:130px;max-height:98px;object-fit:contain}.company-logo-empty{width:110px;height:93px;border-radius:12px;background:#eeebfa;display:grid;place-items:center;color:#7c65d7}.company-logo-editor strong{font-size:14px;color:#313c57}.company-logo-editor p{font-size:12px;color:#8a95ad;margin:6px 0}.company-logo-editor input{display:block;max-width:280px;font-size:11px}.company-logo-editor .action-link{margin-top:10px}.setting-toggle{display:flex;align-items:center;gap:14px;padding:17px;border:1px solid #e8eaf5;border-radius:13px;cursor:pointer}.setting-toggle input{width:19px;height:19px;accent-color:#6e57dc}.setting-toggle span{display:flex;flex-direction:column;gap:5px}.setting-toggle b{font-size:13px;color:#35405d}.setting-toggle small{font-size:11px;color:#8b96ab;line-height:1.4}@media(max-width:540px){.company-panel{padding:16px}.company-logo-editor{padding:15px}.export-buttons{width:100%}.export-buttons .btn{flex:1}}
+
+
+/* Impressão e visualização de relatório individual */
+.report-help{margin:12px 4px 0;color:#6554aa;display:flex;align-items:center;gap:8px;font-size:12px}
+.modal:has(.pdf-preview){width:min(1040px,100%);max-height:96vh}
+.pdf-preview{padding:13px 20px 20px}
+.pdf-preview iframe{display:block;width:100%;height:min(67vh,810px);border:1px solid #d8ddeb;border-radius:9px;background:#f6f7fa}
+.pdf-preview-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:12px;flex-wrap:wrap}
+.pdf-preview .micro-note{font-size:12px;margin-top:12px}
+@media(max-width:540px){.modal:has(.pdf-preview){max-height:98vh}.pdf-preview{padding:9px}.pdf-preview iframe{height:60vh}.pdf-preview-actions .btn{flex:1}}
