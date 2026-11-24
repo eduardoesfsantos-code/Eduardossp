@@ -4,6 +4,7 @@ OBRAPONTO EMPRESA — WINDOWS (VERSÃO DE TESTE 1.1.0)
 2. Abra ObraPonto.Empresa.Windows.exe.
 3. Faça login com os dados da administração de sua empresa.
 4. É necessária conexão com a Internet e Microsoft Edge WebView2 Runtime.
+   O runtime .NET já está incluído no pacote: EXTRAIA TODOS OS ARQUIVOS.
 
 Servidor padrão:
 https://obraponto-servidor-production.up.railway.app
