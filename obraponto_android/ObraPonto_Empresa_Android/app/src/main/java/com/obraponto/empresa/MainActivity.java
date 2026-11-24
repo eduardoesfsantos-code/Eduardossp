@@ -34,6 +34,15 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.io.OutputStream;
+import java.io.FileOutputStream;
+import java.nio.charset.StandardCharsets;
+import android.print.PrintManager;
+import android.print.PrintAttributes;
+import android.print.PrintDocumentAdapter;
+import android.print.PrintDocumentInfo;
+import android.print.PageRange;
+import android.os.CancellationSignal;
+import android.os.ParcelFileDescriptor;
 import android.util.Base64;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -254,6 +263,9 @@ public class MainActivity extends Activity {
         webView.evaluateJavascript(script,null);
     }
     private class MobileBridge {
+        @JavascriptInterface public void printPdf(String dataUrl,String filename) {
+            printPdfDocument(dataUrl,filename);
+        }
         @JavascriptInterface public void saveCsv(String dataUrl,String name) {
             runOnUiThread(() -> {
                 if (dataUrl==null || !dataUrl.startsWith("data:") || dataUrl.length()>20000000) return;
@@ -266,6 +278,52 @@ public class MainActivity extends Activity {
                 i.putExtra(Intent.EXTRA_TITLE,sanitized);
                 try {startActivityForResult(i,SAVE_CSV);} catch(Exception e){Toast.makeText(MainActivity.this,"Não foi possível abrir o salvamento",Toast.LENGTH_LONG).show();}
             });
+        }
+    }
+    /** Envia o PDF recebido da API diretamente ao diálogo de impressão do Android. */
+    private void printPdfDocument(String dataUrl,String filename) {
+        if(dataUrl == null || dataUrl.length() > 20000000 ||
+           !dataUrl.startsWith("data:application/pdf;base64,")) {
+            runOnUiThread(() -> Toast.makeText(this,"PDF inválido ou grande demais",Toast.LENGTH_LONG).show());
+            return;
+        }
+        try {
+            byte[] bytes=Base64.decode(dataUrl.substring(dataUrl.indexOf(',')+1),Base64.DEFAULT);
+            if(bytes.length<5 || !"%PDF-".equals(new String(bytes,0,5,StandardCharsets.US_ASCII))) {
+                throw new IllegalArgumentException("Formato PDF incorreto");
+            }
+            final String safeName=(filename==null?"relatorio-obraponto.pdf":filename).replaceAll("[^a-zA-Z0-9._-]","_");
+            runOnUiThread(() -> {
+                try {
+                    PrintManager manager=(PrintManager)getSystemService(Context.PRINT_SERVICE);
+                    if(manager==null)throw new IllegalStateException("Serviço de impressão indisponível");
+                    PrintDocumentAdapter adapter=new PrintDocumentAdapter() {
+                        @Override public void onLayout(PrintAttributes oldAttributes,PrintAttributes newAttributes,
+                            CancellationSignal cancellationSignal,LayoutResultCallback callback,Bundle extras) {
+                            if(cancellationSignal.isCanceled()) {callback.onLayoutCancelled();return;}
+                            PrintDocumentInfo info=new PrintDocumentInfo.Builder(safeName)
+                                .setContentType(PrintDocumentInfo.CONTENT_TYPE_DOCUMENT)
+                                .setPageCount(PrintDocumentInfo.PAGE_COUNT_UNKNOWN).build();
+                            callback.onLayoutFinished(info,true);
+                        }
+                        @Override public void onWrite(PageRange[] pages,ParcelFileDescriptor destination,
+                            CancellationSignal cancellationSignal,WriteResultCallback callback) {
+                            if(cancellationSignal.isCanceled()) {callback.onWriteCancelled();return;}
+                            try(FileOutputStream out=new FileOutputStream(destination.getFileDescriptor())) {
+                                out.write(bytes);out.flush();
+                                if(cancellationSignal.isCanceled())callback.onWriteCancelled();
+                                else callback.onWriteFinished(new PageRange[]{PageRange.ALL_PAGES});
+                            }catch(Exception e){callback.onWriteFailed("Falha ao preparar impressão do PDF");}
+                        }
+                    };
+                    manager.print("ObraPonto - "+safeName,adapter,
+                        new PrintAttributes.Builder().setMediaSize(PrintAttributes.MediaSize.ISO_A4).build());
+                }catch(Exception e){
+                    Toast.makeText(this,"Não foi possível abrir a impressão",Toast.LENGTH_LONG).show();
+                }
+            });
+        } catch(Exception e) {
+            runOnUiThread(() -> Toast.makeText(this,"Não foi possível preparar o PDF",Toast.LENGTH_LONG).show());
         }
     }
     @Override protected void onActivityResult(int requestCode,int resultCode,Intent data) {
