@@ -9,6 +9,30 @@ android {
         versionCode 120
         versionName '1.2.0'
     }
+
+    // Assinatura de publicação exclusivamente por variáveis protegidas do CI.
+    // Quando ausentes, continua possível gerar AAB sem assinatura para validação.
+    signingConfigs {
+        release {
+            def keyPath = System.getenv('UPLOAD_KEYSTORE_FILE')
+            if (keyPath && System.getenv('UPLOAD_KEYSTORE_PASSWORD') &&
+                System.getenv('UPLOAD_KEY_ALIAS') && System.getenv('UPLOAD_KEY_PASSWORD')) {
+                storeFile file(keyPath)
+                storePassword System.getenv('UPLOAD_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('UPLOAD_KEY_ALIAS')
+                keyPassword System.getenv('UPLOAD_KEY_PASSWORD')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            if (System.getenv('UPLOAD_KEYSTORE_FILE') && System.getenv('UPLOAD_KEYSTORE_PASSWORD') &&
+                System.getenv('UPLOAD_KEY_ALIAS') && System.getenv('UPLOAD_KEY_PASSWORD')) {
+                signingConfig signingConfigs.release
+            }
+            minifyEnabled false
+        }
+    }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
