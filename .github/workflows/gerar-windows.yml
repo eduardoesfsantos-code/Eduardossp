@@ -18,7 +18,7 @@ jobs:
           dotnet-version: '8.0.x'
       - name: Compilar aplicativo Windows
         shell: pwsh
-        run: dotnet publish windows/ObraPonto.Empresa.Windows.csproj -c Release -r win-x64 --self-contained false -o dist/windows
+        run: dotnet publish windows/ObraPonto.Empresa.Windows.csproj -c Release -r win-x64 --self-contained true -o dist/windows
       - name: Incluir orientacoes
         shell: pwsh
         run: Copy-Item windows/LEIA_ANTES_WINDOWS.txt dist/windows/LEIA_ANTES_WINDOWS.txt
