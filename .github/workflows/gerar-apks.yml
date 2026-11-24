@@ -2,6 +2,8 @@ name: Gerar APKs de teste do ObraPonto
 on:
   push:
     branches: [main, develop/obraponto-comercial-v2]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
