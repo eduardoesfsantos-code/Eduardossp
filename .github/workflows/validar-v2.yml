@@ -24,3 +24,6 @@ jobs:
       - name: Testar API, dados e exportações com banco temporário
         working-directory: obraponto_android/ObraPonto_Servidor_Central
         run: node tests/v2-integration.mjs
+      - name: Testar migração do banco antigo e backup
+        working-directory: obraponto_android/ObraPonto_Servidor_Central
+        run: node tests/v2-migration.mjs
