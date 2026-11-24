@@ -21,3 +21,6 @@ jobs:
       - name: Validar API e compilar painéis
         working-directory: obraponto_android/ObraPonto_Servidor_Central
         run: npm run check
+      - name: Testar API, dados e exportações com banco temporário
+        working-directory: obraponto_android/ObraPonto_Servidor_Central
+        run: node tests/v2-integration.mjs
