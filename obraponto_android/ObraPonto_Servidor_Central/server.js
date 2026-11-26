@@ -379,7 +379,7 @@ app.get('/api/admin/dashboard',auth,admin,wrap((_req,res)=>{
  const punches=db.prepare('SELECT p.*,s.name AS site_name,s.city AS site_city FROM punches p JOIN sites s ON p.site_id=s.id WHERE p.day=? ORDER BY p.at').all(day);
  const overview=workers.map(w=>{const own=punches.filter(p=>p.user_id===w.id),last=own.at(-1),assignment=assignments.find(a=>a.worker_id===w.id);const site=last||assignment;return {...w,site_name:site?.site_name||'Sem obra',site_city:site?.site_city||'',last_type:last?.type||null,last_at:last?.at||null,minutes:duration(own,!!last&&last.type!=='out'),status:!last?'Não iniciou':last.type==='out'?'Finalizado':last.type==='break_start'?'Em intervalo':'Em serviço'};});
  const activity=db.prepare('SELECT p.*,u.name AS worker_name,s.name AS site_name,s.city AS site_city FROM punches p JOIN users u ON u.id=p.user_id JOIN sites s ON s.id=p.site_id ORDER BY p.at DESC LIMIT 12').all();
- res.json({day,overview,activity,stats:{employees:workers.length,present:overview.filter(w=>w.last_type&&w.last_type!=='out').length,completed:overview.filter(w=>w.last_type==='out').length,missing:overview.filter(w=>!w.last_type).length,sites:db.prepare('SELECT COUNT(*) AS n FROM sites WHERE active=1').get().n}});
+ res.json({day,overview,activity,stats:{employees:workers.length,present:overview.filter(w=>w.last_type&&w.last_type!=='out').length,completed:overview.filter(w=>w.last_type==='out').length,missing:overview.filter(w=>!w.last_type).length,sites:db.prepare('SELECT COUNT(*) AS n FROM sites WHERE active=1').get().n,punchesToday:punches.length,pendingRequests:db.prepare("SELECT COUNT(*) AS n FROM requests WHERE status='pending'").get().n}});
 }));
 
 app.post('/api/worker/requests',auth,wrap((req,res)=>{
