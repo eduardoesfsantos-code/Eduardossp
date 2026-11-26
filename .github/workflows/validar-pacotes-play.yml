@@ -1,0 +1,44 @@
+name: Preparar pacotes ObraPonto para Google Play
+on:
+  push:
+    branches: [release/play-console-preparacao]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android-play:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Obter codigo-fonte
+        uses: actions/checkout@v4
+      - name: Configurar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Instalar Android SDK 36
+        shell: bash
+        run: |
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+      - name: Preparar Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Gerar AAB Empresa
+        run: gradle -p obraponto_android/ObraPonto_Empresa_Android --no-daemon bundleRelease
+      - name: Gerar AAB Funcionario
+        run: gradle -p obraponto_android/ObraPonto_Funcionario_Android --no-daemon bundleRelease
+      - name: Arquivar bundles NAO ASSINADOS para validacao
+        uses: actions/upload-artifact@v4
+        with:
+          name: ObraPonto-Play-AAB-NAO-ASSINADOS
+          path: |
+            obraponto_android/ObraPonto_Empresa_Android/app/build/outputs/bundle/release/*.aab
+            obraponto_android/ObraPonto_Funcionario_Android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
