@@ -12,6 +12,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.Gravity;
+import android.view.WindowInsets;
+import android.graphics.Insets;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
@@ -46,9 +48,9 @@ public class MainActivity extends Activity {
     private static final String SERVER_KEY = "server_origin";
     private static final String DEFAULT_ORIGIN = BuildConfig.DEFAULT_ORIGIN;
     private static final int SAVE_CSV = 4096;
-    private static final int NAVY = Color.rgb(10, 17, 35);
-    private static final int CARD = Color.rgb(20, 32, 58);
-    private static final int MINT = Color.rgb(26, 204, 166);
+    private static final int NAVY = Color.rgb(16, 44, 75);
+    private static final int CARD = Color.rgb(22, 55, 87);
+    private static final int MINT = Color.rgb(255, 167, 63);
     private static final String APP_ROUTE = "/funcionario/";
     private static final String APP_TITLE = "ObraPonto Funcionário";
     private static final String APP_TAG = "Funcionário";
@@ -77,11 +79,28 @@ public class MainActivity extends Activity {
         l.setOrientation(LinearLayout.VERTICAL);
         return l;
     }
+    // Android 15/16: a janela é edge-to-edge; reserve barras, recortes e teclado.
+    private void installRoot(View root) {
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            if (Build.VERSION.SDK_INT >= 30) {
+                Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                Insets ime = insets.getInsets(WindowInsets.Type.ime());
+                v.setPadding(safe.left, safe.top, safe.right, Math.max(safe.bottom, ime.bottom));
+                return WindowInsets.CONSUMED;
+            }
+            v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+            return insets.consumeSystemWindowInsets();
+        });
+        setContentView(root);
+        root.requestApplyInsets();
+    }
     private String settingsOrigin() {
         return getSharedPreferences(PREFS, MODE_PRIVATE).getString(SERVER_KEY, DEFAULT_ORIGIN);
     }
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
         getWindow().setStatusBarColor(NAVY);
         getWindow().setNavigationBarColor(NAVY);
         origin = settingsOrigin();
@@ -170,7 +189,7 @@ public class MainActivity extends Activity {
         TextView foot = text(""+APP_TITLE+"  •  Acesso protegido por HTTPS", 11, 0xff8499b1, false);
         foot.setGravity(Gravity.CENTER); foot.setPadding(0, dp(26), 0, 0);
         content.addView(foot);
-        setContentView(root);
+        installRoot(root);
     }
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     private void showApp() {
@@ -244,7 +263,7 @@ public class MainActivity extends Activity {
         progress.setProgressTintList(android.content.res.ColorStateList.valueOf(MINT));
         FrameLayout.LayoutParams pp=new FrameLayout.LayoutParams(-1,dp(3),Gravity.TOP);
         body.addView(progress,pp);
-        setContentView(root);
+        installRoot(root);
         webView.loadUrl(origin + APP_ROUTE);
     }
     private void installExportHook() {
