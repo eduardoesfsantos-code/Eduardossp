@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHmac} from 'node:crypto';
 import {spawn} from 'node:child_process';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,rmSync,readdirSync,statSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -10,6 +10,17 @@ import Database from 'better-sqlite3';
 
 const dir=mkdtempSync(path.join(tmpdir(),'obraponto-rect-'));
 const dbFile=path.join(dir,'test.sqlite');
+// Banco legado fictício para provar que a cópia é anterior às alterações.
+const legacy=new Database(dbFile);
+legacy.exec(`CREATE TABLE users (
+ id TEXT PRIMARY KEY, name TEXT NOT NULL, email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+ phone TEXT DEFAULT '', employee_code TEXT DEFAULT '', trade TEXT DEFAULT '',
+ role TEXT NOT NULL CHECK(role IN ('admin','worker')),
+ password_hash TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL
+);
+INSERT INTO users(id,name,email,role,password_hash,active,created_at)
+VALUES ('legacy-test','Registro legado fictício','legacy@example.test','worker','disabled-test',0,'2020-01-01T00:00:00Z');`);
+legacy.close();
 const probe=createServer();
 await new Promise((resolve,reject)=>{probe.once('error',reject);probe.listen(0,'127.0.0.1',resolve);});
 const port=probe.address().port;
@@ -34,6 +45,23 @@ try{
  let ready=false;
  for(let i=0;i<100;i++){try{if((await fetch(base+'/api/health')).ok){ready=true;break;}}catch{}if(server.exitCode!==null)break;await wait(150);}
  assert.ok(ready,'Servidor não iniciou: '+logs);
+ assert.match(logs,/BACKUP_PRE_MIGRACAO_OK/);
+ const backupDir=path.join(dir,'backups'),names=readdirSync(backupDir).filter(n=>n.endsWith('.sqlite'));
+ assert.equal(names.length,1);
+ const backupPath=path.join(backupDir,names[0]);
+ assert.equal(statSync(backupPath).mode&0o777,0o600);
+ const snapshot=new Database(backupPath,{readonly:true,fileMustExist:true});
+ try{
+  assert.equal(snapshot.pragma('quick_check',{simple:true}),'ok');
+  assert.equal(snapshot.prepare("SELECT name FROM users WHERE id='legacy-test'").get().name,'Registro legado fictício');
+  assert.ok(!snapshot.pragma('table_info(users)').some(c=>c.name==='photo_data_url'));
+  assert.equal(snapshot.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='work_orders'").get(),undefined);
+ }finally{snapshot.close();}
+ const current=new Database(dbFile,{readonly:true});
+ try{
+  assert.equal(current.prepare("SELECT name FROM users WHERE id='legacy-test'").get().name,'Registro legado fictício');
+  assert.ok(current.pragma('table_info(users)').some(c=>c.name==='photo_data_url'));
+ }finally{current.close();}
  const admin=(await call('/login',null,'POST',{email:adminEmail,password})).token;
  const workerId=(await call('/admin/workers',admin,'POST',{name:'Colaborador Teste',email:workerEmail,password},201)).worker.id;
  const worker=(await call('/login',null,'POST',{email:workerEmail,password})).token;
@@ -193,7 +221,7 @@ try{
  assert.deepEqual(db.prepare('SELECT * FROM punches WHERE user_id=?').all(workerId),before);
  const noCache=await fetch(base+'/api/me',{headers:{Authorization:'Bearer '+worker}});
  assert.match(noCache.headers.get('cache-control')||'',/no-store/);
- console.log('OK: retificação, PDF, Excel, privacidade, foto, turno, logo, arquivamento, avisos, folhas de ponto, atestados e ordens de serviço fictícias; isolamento entre contas no ambiente monoempresa.');
+ console.log('OK: backup pré-migração, retificação, PDF, Excel, privacidade, foto, turno, logo, arquivamento, avisos, folhas de ponto, atestados e ordens de serviço fictícias; isolamento entre contas no ambiente monoempresa.');
 }finally{
  db?.close();
  if(server.exitCode===null){const exited=new Promise(r=>server.once('exit',r));server.kill();await exited;}
