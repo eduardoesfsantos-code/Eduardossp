@@ -21,15 +21,27 @@ const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 db.pragma('busy_timeout = 10000');
-// Backup de transição criado antes de qualquer migração da V2.
-// A cópia fica no volume persistente; NÃO substitui backup externo.
-const legacySchema=db.pragma('table_info(users)').length>0 && db.pragma('table_info(company_profile)').length===0;
-if(legacySchema){
+// Snapshot consistente ANTES de qualquer alteração de esquema. Não substitui backup externo.
+const tables=new Map(db.prepare("SELECT name,sql FROM sqlite_master WHERE type='table'").all().map(t=>[t.name,t.sql]));
+const userColumns=new Set(db.pragma('table_info(users)').map(c=>c.name));
+const migrationNeeded=tables.has('users')&&(
+ ['sites','assignments','punches','requests','email_verification','privacy_requests','punch_rectifications','audit','company_profile','worker_notices','private_documents','work_orders'].some(t=>!tables.has(t))||
+ ['archived_at','email_verified_at','photo_data_url','shift'].some(c=>!userColumns.has(c))||
+ !tables.get('private_documents')?.includes("'timesheet'")
+);
+if(migrationNeeded){
  const backupDir=path.join(path.dirname(dbPath),'backups');
  fs.mkdirSync(backupDir,{recursive:true,mode:0o700});
- const backupFile=path.join(backupDir,`obraponto-antes-v2-${new Date().toISOString().replace(/[:.]/g,'-')}.sqlite`);
+ fs.chmodSync(backupDir,0o700);
+ const backupFile=path.join(backupDir,`obraponto-pre-migracao-1.4.0-${new Date().toISOString().replace(/[:.]/g,'-')}-${randomUUID()}.sqlite`);
+ // Qualquer falha interrompe a inicialização antes das migrações.
  db.prepare('VACUUM INTO ?').run(backupFile);
- console.log('Cópia de segurança pré-V2 criada no volume persistente.');
+ fs.chmodSync(backupFile,0o600);
+ const snapshot=new Database(backupFile,{readonly:true,fileMustExist:true});
+ try{
+  if(snapshot.pragma('quick_check',{simple:true})!=='ok')throw Error('Cópia pré-migração não passou na verificação de integridade.');
+ }finally{snapshot.close();}
+ console.log('BACKUP_PRE_MIGRACAO_OK '+path.basename(backupFile));
 }
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
