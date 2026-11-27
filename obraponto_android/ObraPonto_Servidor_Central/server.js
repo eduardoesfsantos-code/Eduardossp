@@ -124,11 +124,37 @@ CREATE INDEX IF NOT EXISTS worker_notices_recipient ON worker_notices(worker_id,
 // Documentos em fase de teste, desabilitados por padrão. Não servir em rotas públicas.
 db.exec(`CREATE TABLE IF NOT EXISTS private_documents (
  id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES users(id),
- uploader_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL CHECK(kind IN ('medical','payslip')),
+ uploader_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL CHECK(kind IN ('medical','payslip','timesheet')),
  period TEXT NOT NULL DEFAULT '', mime TEXT NOT NULL, content BLOB NOT NULL,
  created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'received', reviewed_at TEXT
 );
 CREATE INDEX IF NOT EXISTS private_documents_owner ON private_documents(worker_id,created_at);`);
+// Preserva documentos legados sem convertê-los em folhas de ponto.
+if(!db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='private_documents'").get().sql.includes("'timesheet'")){
+ db.transaction(()=>{
+  db.exec(`CREATE TABLE private_documents_next (
+   id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES users(id),
+   uploader_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL CHECK(kind IN ('medical','payslip','timesheet')),
+   period TEXT NOT NULL DEFAULT '', mime TEXT NOT NULL, content BLOB NOT NULL,
+   created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'received', reviewed_at TEXT
+  );
+  INSERT INTO private_documents_next (id,worker_id,uploader_id,kind,period,mime,content,created_at,status,reviewed_at)
+  SELECT id,worker_id,uploader_id,kind,period,mime,content,created_at,status,reviewed_at FROM private_documents;
+  DROP TABLE private_documents;
+  ALTER TABLE private_documents_next RENAME TO private_documents;
+  CREATE INDEX private_documents_owner ON private_documents(worker_id,created_at);`);
+ })();
+}
+db.exec(`CREATE TABLE IF NOT EXISTS work_orders (
+ number INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
+ worker_id TEXT NOT NULL REFERENCES users(id), site_id TEXT NOT NULL REFERENCES sites(id),
+ creator_id TEXT NOT NULL REFERENCES users(id), title TEXT NOT NULL, description TEXT NOT NULL,
+ priority TEXT NOT NULL CHECK(priority IN ('normal','high','urgent')),
+ due_day TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'sent' CHECK(status IN ('sent','accepted','in_progress','completed','cancelled')),
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ accepted_at TEXT, started_at TEXT, completed_at TEXT, cancelled_at TEXT, completion_note TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS work_orders_worker ON work_orders(worker_id,number DESC);`);
 const documentsEnabled=process.env.OBRAPONTO_PRIVATE_DOCUMENTS==='1';
 const companyProfile=()=>{
  const row=db.prepare('SELECT * FROM company_profile WHERE id=1').get();
@@ -653,6 +679,57 @@ app.patch('/api/worker/notices/:id/read',auth,workerOnly,wrap((req,res)=>{
  if(!notice.read_at){db.prepare('UPDATE worker_notices SET read_at=? WHERE id=? AND worker_id=?').run(now(),notice.id,req.user.id);changed('notices',req.user.id);}
  res.json({ok:true});
 }));
+// Ordens de serviço: não criam ou alteram marcações de ponto nem alocações.
+const orderQuery="SELECT o.*,u.name AS worker_name,s.name AS site_name,s.city AS site_city FROM work_orders o JOIN users u ON u.id=o.worker_id JOIN sites s ON s.id=o.site_id";
+app.get('/api/admin/work-orders',auth,admin,wrap((_req,res)=>{
+ res.json({orders:db.prepare(orderQuery+' ORDER BY o.number DESC LIMIT 200').all()});
+}));
+app.post('/api/admin/work-orders',auth,admin,wrap((req,res)=>{
+ const workerId=required(req.body.worker_id,'Funcionário',40),siteId=required(req.body.site_id,'Obra',40);
+ if(!db.prepare("SELECT id FROM users WHERE id=? AND role='worker' AND active=1").get(workerId))fail(404,'Funcionário ativo não encontrado.');
+ if(!db.prepare('SELECT id FROM sites WHERE id=? AND active=1').get(siteId))fail(404,'Obra ativa não encontrada.');
+ const title=required(req.body.title,'Título',120),description=required(req.body.description,'Descrição',2000);
+ const priority=req.body.priority??'normal',dueDay=str(req.body.due_day,10);
+ if(!['normal','high','urgent'].includes(priority))fail(400,'Prioridade inválida.');
+ if(dueDay&&(!isDate(dueDay)||new Date(dueDay+'T12:00:00Z').toISOString().slice(0,10)!==dueDay))fail(400,'Prazo inválido.');
+ const orderId=id(),stamp=now();
+ const order=db.transaction(()=>{
+  const result=db.prepare('INSERT INTO work_orders(id,worker_id,site_id,creator_id,title,description,priority,due_day,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run(orderId,workerId,siteId,req.user.id,title,description,priority,dueDay,stamp,stamp);
+  db.prepare('INSERT INTO worker_notices(id,worker_id,sender_id,message,created_at) VALUES (?,?,?,?,?)').run(id(),workerId,req.user.id,'Nova ordem de serviço #'+result.lastInsertRowid+': '+title,stamp);
+  audit(req.user.id,'work_order_created',orderId,workerId);
+  return db.prepare(orderQuery+' WHERE o.id=?').get(orderId);
+ })();
+ changed('orders',workerId);res.status(201).json({order});
+}));
+app.get('/api/worker/work-orders',auth,workerOnly,wrap((req,res)=>{
+ res.json({orders:db.prepare(orderQuery+' WHERE o.worker_id=? ORDER BY o.number DESC LIMIT 200').all(req.user.id)});
+}));
+app.patch('/api/worker/work-orders/:id/status',auth,workerOnly,wrap((req,res)=>{
+ const next=req.body.status,stamp=now();
+ const result=db.transaction(()=>{
+  const order=db.prepare('SELECT * FROM work_orders WHERE id=? AND worker_id=?').get(req.params.id,req.user.id);
+  if(!order)fail(404,'Ordem de serviço não encontrada.');
+  const transitions={sent:'accepted',accepted:'in_progress',in_progress:'completed'};
+  if(transitions[order.status]!==next||!['accepted','in_progress','completed'].includes(next))fail(409,'Transição de situação inválida.');
+  const note=next==='completed'?str(req.body.completion_note,1000):order.completion_note;
+  db.prepare('UPDATE work_orders SET status=?,updated_at=?,accepted_at=?,started_at=?,completed_at=?,completion_note=? WHERE id=?').run(next,stamp,next==='accepted'?stamp:order.accepted_at,next==='in_progress'?stamp:order.started_at,next==='completed'?stamp:order.completed_at,note,order.id);
+  audit(req.user.id,'work_order_status',order.id,next);
+  return {id:order.id,status:next};
+ })();
+ changed('orders',req.user.id);res.json({order:result});
+}));
+app.patch('/api/admin/work-orders/:id/cancel',auth,admin,wrap((req,res)=>{
+ const workerId=db.transaction(()=>{
+  const order=db.prepare('SELECT * FROM work_orders WHERE id=?').get(req.params.id);if(!order)fail(404,'Ordem de serviço não encontrada.');
+  if(['completed','cancelled'].includes(order.status))fail(409,'Ordem já encerrada.');
+  const stamp=now();
+  db.prepare("UPDATE work_orders SET status='cancelled',updated_at=?,cancelled_at=? WHERE id=?").run(stamp,stamp,order.id);
+  db.prepare('INSERT INTO worker_notices(id,worker_id,sender_id,message,created_at) VALUES (?,?,?,?,?)').run(id(),order.worker_id,req.user.id,'Ordem de serviço #'+order.number+' cancelada.',stamp);
+  audit(req.user.id,'work_order_cancelled',order.id);
+  return order.worker_id;
+ })();
+ changed('orders',workerId);res.json({ok:true});
+}));
 const requireDocuments=(req,res,next)=>documentsEnabled?next():res.status(503).json({error:'Documentos privados ainda em validação.'});
 app.get('/api/documents/config',auth,(_req,res)=>res.json({enabled:documentsEnabled,max_bytes:2000000}));
 const docMeta='id,kind,period,mime,created_at,status,reviewed_at';
@@ -664,13 +741,14 @@ const readDocumentUpload=(body,kind)=>{
  const validPdf=mime==='application/pdf'&&bytes.subarray(0,5).toString()==='%PDF-'&&bytes.subarray(-2048).includes(Buffer.from('%%EOF'));
  const validPng=mime==='image/png'&&bytes.length>=24&&bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))&&bytes.subarray(12,16).toString()==='IHDR';
  const validJpg=mime==='image/jpeg'&&bytes.length>4&&bytes[0]===255&&bytes[1]===216&&bytes[2]===255&&bytes[bytes.length-2]===255&&bytes[bytes.length-1]===217;
- if(!validPdf&&!(kind==='medical'&&(validPng||validJpg)))fail(400,kind==='payslip'?'Holerite deve ser um PDF válido.':'Formato de documento inválido.');
+ if(!validPdf&&!(kind==='medical'&&(validPng||validJpg)))fail(400,kind==='timesheet'?'Folha de ponto deve ser um PDF válido.':'Formato de documento inválido.');
  return {mime,bytes};
 };
 const addDocument=(req,res,workerId,kind)=>{
  const {mime,bytes}=readDocumentUpload(req.body,kind);
- const period=kind==='payslip'?str(req.body.period,7):'';
- if(kind==='payslip'&&!/^\d{4}-(0[1-9]|1[0-2])$/.test(period))fail(400,'Informe a competência do holerite.');
+ const period=kind==='timesheet'?str(req.body.period,7):'';
+ if(kind==='timesheet'&&(!/^\d{4}-(0[1-9]|1[0-2])$/.test(period)||period>today().slice(0,7)))fail(400,'Informe uma competência válida, não futura.');
+ if(kind==='timesheet'&&req.body.closed!==true)fail(400,'Confirme o fechamento do período antes de disponibilizar a folha.');
  const docId=id(),created=now();
  db.transaction(()=>{
   if(db.prepare('SELECT COUNT(*) n FROM private_documents WHERE uploader_id=? AND created_at>=?').get(req.user.id,new Date(Date.now()-86400000).toISOString()).n>=50)fail(429,'Limite de envios atingido. Tente mais tarde.');
@@ -679,21 +757,21 @@ const addDocument=(req,res,workerId,kind)=>{
  })();
  changed('documents',workerId);res.status(201).json({id:docId});
 };
-app.get('/api/worker/documents',auth,workerOnly,requireDocuments,wrap((req,res)=>res.json({documents:db.prepare('SELECT '+docMeta+' FROM private_documents WHERE worker_id=? ORDER BY created_at DESC LIMIT 200').all(req.user.id)})));
+app.get('/api/worker/documents',auth,workerOnly,requireDocuments,wrap((req,res)=>res.json({documents:db.prepare('SELECT '+docMeta+' FROM private_documents WHERE worker_id=? AND kind IN (\'medical\',\'timesheet\') ORDER BY created_at DESC LIMIT 200').all(req.user.id)})));
 app.post('/api/worker/documents',auth,workerOnly,requireDocuments,documentJson,wrap((req,res)=>addDocument(req,res,req.user.id,'medical')));
 app.get('/api/admin/workers/:id/documents',auth,admin,requireDocuments,wrap((req,res)=>{
  if(!db.prepare("SELECT id FROM users WHERE id=? AND role='worker'").get(req.params.id))fail(404,'Funcionário não encontrado.');
- res.json({documents:db.prepare('SELECT '+docMeta+' FROM private_documents WHERE worker_id=? ORDER BY created_at DESC LIMIT 200').all(req.params.id)});
+ res.json({documents:db.prepare('SELECT '+docMeta+' FROM private_documents WHERE worker_id=? AND kind IN (\'medical\',\'timesheet\') ORDER BY created_at DESC LIMIT 200').all(req.params.id)});
 }));
 app.post('/api/admin/workers/:id/documents',auth,admin,requireDocuments,documentJson,wrap((req,res)=>{
  if(!db.prepare("SELECT id FROM users WHERE id=? AND role='worker' AND active=1").get(req.params.id))fail(404,'Funcionário ativo não encontrado.');
- addDocument(req,res,req.params.id,'payslip');
+ addDocument(req,res,req.params.id,'timesheet');
 }));
 app.get('/api/documents/:id/download',auth,requireDocuments,wrap((req,res)=>{
- const doc=db.prepare('SELECT * FROM private_documents WHERE id=? AND (?=\'admin\' OR worker_id=?)').get(req.params.id,req.user.role,req.user.id);
+ const doc=db.prepare('SELECT * FROM private_documents WHERE id=? AND kind IN (\'medical\',\'timesheet\') AND (?=\'admin\' OR worker_id=?)').get(req.params.id,req.user.role,req.user.id);
  if(!doc)fail(404,'Documento não encontrado.');
  const ext=doc.mime==='application/pdf'?'pdf':doc.mime==='image/png'?'png':'jpg';
- const name=doc.kind==='payslip'?'holerite-'+doc.period:'atestado-'+doc.id.slice(0,8);
+ const name=doc.kind==='timesheet'?'folha-de-ponto-'+doc.period:'atestado-'+doc.id.slice(0,8);
  audit(req.user.id,'private_document_downloaded',doc.id,doc.kind);
  res.set('X-Content-Type-Options','nosniff');res.attachment(name+'.'+ext);res.type(doc.mime).send(doc.content);
 }));
