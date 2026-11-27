@@ -1,0 +1,52 @@
+name: ObraPonto 1.4.0 - APKs de teste e AABs de validação
+on:
+  push:
+    branches: [release/android-1.4.0-rc1]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: Empresa
+            dir: ObraPonto_Empresa_Android
+          - app: Funcionario
+            dir: ObraPonto_Funcionario_Android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Preparar SDK
+        shell: bash
+        run: |
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)
+          test -n "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+      - name: Compilar APK debug e AAB sem assinatura
+        env:
+          OBRAPONTO_SAAS_BASE_URL: ''
+        run: gradle -p obraponto_android/${{ matrix.dir }} --no-daemon assembleDebug bundleRelease
+      - name: Organizar pacotes sem dados privados
+        run: |
+          mkdir -p pacotes
+          cp obraponto_android/${{ matrix.dir }}/app/build/outputs/apk/debug/app-debug.apk pacotes/ObraPonto-${{ matrix.app }}-1.4.0-TESTE.apk
+          cp obraponto_android/${{ matrix.dir }}/app/build/outputs/bundle/release/app-release.aab pacotes/ObraPonto-${{ matrix.app }}-1.4.0-NAO-ASSINADO.aab
+          cd pacotes
+          sha256sum *.apk *.aab > SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ObraPonto-${{ matrix.app }}-1.4.0-validacao
+          path: pacotes/
+          retention-days: 7
+          if-no-files-found: error
