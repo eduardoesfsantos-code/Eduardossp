@@ -80,7 +80,22 @@ try{
  row=(await call(report,admin)).rows[0];
  assert.equal(row.punches.length,1);assert.equal(row.original_punches.length,1);assert.equal(row.rectifications.length,3);assert.equal(row.status,'Pendente');
  assert.deepEqual(db.prepare('SELECT * FROM punches WHERE user_id=?').all(workerId),before);
- console.log('OK: autorização, sequência, conflito, original preservado, auditoria imutável, sincronização via API, totais, PDF e Excel.');
+ const privacy=await call('/privacy/requests',worker,'POST',{kind:'deletion',message:'Solicito análise de exclusão da conta de teste.'},201);
+ await call('/privacy/requests',worker,'POST',{kind:'deletion',message:'Solicitação repetida de teste.'},409);
+ await call('/admin/privacy/requests',worker,'GET',undefined,403);
+ const otherId=(await call('/admin/workers',admin,'POST',{name:'Outro colaborador',email:'other@example.test',password},201)).worker.id;
+ const other=(await call('/login',null,'POST',{email:'other@example.test',password})).token;
+ assert.equal((await call('/privacy/requests',other)).requests.length,0);
+ assert.ok(!(await call(history,other)).rows.some(r=>r.worker_id===workerId));
+ await call('/admin/privacy/requests/'+privacy.id,other,'PATCH',{status:'answered',response:'Não permitido.'},403);
+ await call('/admin/privacy/requests/'+privacy.id,admin,'PATCH',{status:'in_review'});
+ await call('/admin/privacy/requests/'+privacy.id,admin,'PATCH',{status:'answered',response:'Resposta de teste: nenhuma exclusão executada.'});
+ assert.equal((await call('/privacy/requests',worker)).requests[0].status,'answered');
+ assert.equal((await call('/admin/privacy/requests',admin)).requests.length,1);
+ assert.deepEqual(db.prepare('SELECT * FROM punches WHERE user_id=?').all(workerId),before);
+ const noCache=await fetch(base+'/api/me',{headers:{Authorization:'Bearer '+worker}});
+ assert.match(noCache.headers.get('cache-control')||'',/no-store/);
+ console.log('OK: retificação, PDF, Excel, preservação de originais, privacidade, autorização e isolamento entre contas no ambiente monoempresa.');
 }finally{
  db?.close();
  if(server.exitCode===null){const exited=new Promise(r=>server.once('exit',r));server.kill();await exited;}
