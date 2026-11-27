@@ -6,6 +6,7 @@
       android:label="@string/app_name" android:icon="@drawable/brand_logo"
       android:roundIcon="@drawable/brand_logo" android:supportsRtl="true" android:theme="@style/ObraTheme">
     <activity android:name=".MainActivity" android:exported="true"
+       android:windowSoftInputMode="adjustResize"
        android:configChanges="orientation|screenSize|keyboardHidden">
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>

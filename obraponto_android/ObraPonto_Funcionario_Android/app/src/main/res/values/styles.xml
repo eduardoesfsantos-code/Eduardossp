@@ -1,9 +1,9 @@
 <resources>
 <style name="ObraTheme" parent="android:style/Theme.Material.Light.NoActionBar">
     <item name="android:fontFamily">sans</item>
-    <item name="android:colorAccent">#1ACCA6</item>
-    <item name="android:statusBarColor">#0A1123</item>
-    <item name="android:navigationBarColor">#0A1123</item>
+    <item name="android:colorAccent">#F18A16</item>
+    <item name="android:statusBarColor">#102C4B</item>
+    <item name="android:navigationBarColor">#102C4B</item>
     <item name="android:windowLightStatusBar">false</item>
 </style>
 </resources>

@@ -79,21 +79,46 @@ public class MainActivity extends Activity {
         l.setOrientation(LinearLayout.VERTICAL);
         return l;
     }
-    // Android 15/16: a janela é edge-to-edge; reserve barras, recortes e teclado.
+    // Preserve native system-bar safe areas, including when returning from printing.
+    private View currentRoot;
+    private void applySafeInsets(View root, WindowInsets insets) {
+        if (Build.VERSION.SDK_INT >= 30 && insets != null) {
+            Insets safe = insets.getInsetsIgnoringVisibility(
+                WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+            Insets ime = insets.getInsets(WindowInsets.Type.ime());
+            root.setPadding(safe.left, safe.top, safe.right, Math.max(safe.bottom, ime.bottom));
+        }
+    }
     private void installRoot(View root) {
-        root.setOnApplyWindowInsetsListener((v, insets) -> {
-            if (Build.VERSION.SDK_INT >= 30) {
-                Insets safe = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
-                Insets ime = insets.getInsets(WindowInsets.Type.ime());
-                v.setPadding(safe.left, safe.top, safe.right, Math.max(safe.bottom, ime.bottom));
+        currentRoot = root;
+        if (Build.VERSION.SDK_INT >= 30) {
+            root.setOnApplyWindowInsetsListener((v, insets) -> {
+                applySafeInsets(v, insets);
                 return WindowInsets.CONSUMED;
-            }
-            v.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
-                insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
-            return insets.consumeSystemWindowInsets();
-        });
+            });
+            root.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                @Override public void onViewAttachedToWindow(View v) {
+                    applySafeInsets(v, v.getRootWindowInsets());
+                    v.requestApplyInsets();
+                }
+                @Override public void onViewDetachedFromWindow(View v) {}
+            });
+        }
         setContentView(root);
-        root.requestApplyInsets();
+        if (Build.VERSION.SDK_INT >= 30) {
+            root.post(() -> {
+                if (currentRoot != root) return;
+                applySafeInsets(root, root.getRootWindowInsets());
+                root.requestApplyInsets();
+            });
+        }
+    }
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && currentRoot != null && Build.VERSION.SDK_INT >= 30) {
+            applySafeInsets(currentRoot, currentRoot.getRootWindowInsets());
+            currentRoot.requestApplyInsets();
+        }
     }
     private String settingsOrigin() {
         return getSharedPreferences(PREFS, MODE_PRIVATE).getString(SERVER_KEY, DEFAULT_ORIGIN);
