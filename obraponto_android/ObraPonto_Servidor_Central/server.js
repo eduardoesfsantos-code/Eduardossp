@@ -121,6 +121,15 @@ db.exec(`CREATE TABLE IF NOT EXISTS worker_notices (
  created_at TEXT NOT NULL, read_at TEXT
 );
 CREATE INDEX IF NOT EXISTS worker_notices_recipient ON worker_notices(worker_id,created_at);`);
+// Documentos em fase de teste, desabilitados por padrão. Não servir em rotas públicas.
+db.exec(`CREATE TABLE IF NOT EXISTS private_documents (
+ id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES users(id),
+ uploader_id TEXT NOT NULL REFERENCES users(id), kind TEXT NOT NULL CHECK(kind IN ('medical','payslip')),
+ period TEXT NOT NULL DEFAULT '', mime TEXT NOT NULL, content BLOB NOT NULL,
+ created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'received', reviewed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS private_documents_owner ON private_documents(worker_id,created_at);`);
+const documentsEnabled=process.env.OBRAPONTO_PRIVATE_DOCUMENTS==='1';
 const companyProfile=()=>{
  const row=db.prepare('SELECT * FROM company_profile WHERE id=1').get();
  return {...row,allow_worker_select_site:!!row.allow_worker_select_site,allow_worker_requests:!!row.allow_worker_requests};
@@ -172,7 +181,11 @@ app.disable('x-powered-by');
 app.set('trust proxy',1); // Railway encaminha IP de origem por proxy.
 app.use(helmet({contentSecurityPolicy: false}));
 app.use('/api',(_req,res,next)=>{res.set('Cache-Control','private, no-store, max-age=0');res.set('Pragma','no-cache');next();});
-app.use(express.json({limit:'256kb'}));
+const smallJson=express.json({limit:'256kb'}),documentJson=express.json({limit:'3mb'});
+app.use((req,res,next)=>{
+ const documentUpload=req.method==='POST'&&(/^\/api\/worker\/documents\/?$/.test(req.path)||/^\/api\/admin\/workers\/[^/]+\/documents\/?$/.test(req.path));
+ return documentUpload?next():smallJson(req,res,next);
+});
 const http = createServer(app);
 const io = new Server(http, {cors:{origin:false}});
 
@@ -639,6 +652,57 @@ app.patch('/api/worker/notices/:id/read',auth,workerOnly,wrap((req,res)=>{
  const notice=db.prepare('SELECT id,read_at FROM worker_notices WHERE id=? AND worker_id=?').get(req.params.id,req.user.id);if(!notice)fail(404,'Aviso não encontrado.');
  if(!notice.read_at){db.prepare('UPDATE worker_notices SET read_at=? WHERE id=? AND worker_id=?').run(now(),notice.id,req.user.id);changed('notices',req.user.id);}
  res.json({ok:true});
+}));
+const requireDocuments=(req,res,next)=>documentsEnabled?next():res.status(503).json({error:'Documentos privados ainda em validação.'});
+app.get('/api/documents/config',auth,(_req,res)=>res.json({enabled:documentsEnabled,max_bytes:2000000}));
+const docMeta='id,kind,period,mime,created_at,status,reviewed_at';
+const readDocumentUpload=(body,kind)=>{
+ const raw=body?.data_url;
+ if(typeof raw!=='string'||raw.length>2700000||!/^data:(application\/pdf|image\/jpeg|image\/png);base64,[A-Za-z0-9+/]+={0,2}$/.test(raw))fail(400,'Arquivo inválido. Use PDF, JPG ou PNG de até 2 MB.');
+ const [header,encoded]=raw.split(','),mime=header.slice(5,-7),bytes=Buffer.from(encoded,'base64');
+ if(!bytes.length||bytes.length>2000000||bytes.toString('base64')!==encoded)fail(400,'Arquivo inválido ou acima de 2 MB.');
+ const validPdf=mime==='application/pdf'&&bytes.subarray(0,5).toString()==='%PDF-'&&bytes.subarray(-2048).includes(Buffer.from('%%EOF'));
+ const validPng=mime==='image/png'&&bytes.length>=24&&bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))&&bytes.subarray(12,16).toString()==='IHDR';
+ const validJpg=mime==='image/jpeg'&&bytes.length>4&&bytes[0]===255&&bytes[1]===216&&bytes[2]===255&&bytes[bytes.length-2]===255&&bytes[bytes.length-1]===217;
+ if(!validPdf&&!(kind==='medical'&&(validPng||validJpg)))fail(400,kind==='payslip'?'Holerite deve ser um PDF válido.':'Formato de documento inválido.');
+ return {mime,bytes};
+};
+const addDocument=(req,res,workerId,kind)=>{
+ const {mime,bytes}=readDocumentUpload(req.body,kind);
+ const period=kind==='payslip'?str(req.body.period,7):'';
+ if(kind==='payslip'&&!/^\d{4}-(0[1-9]|1[0-2])$/.test(period))fail(400,'Informe a competência do holerite.');
+ const docId=id(),created=now();
+ db.transaction(()=>{
+  if(db.prepare('SELECT COUNT(*) n FROM private_documents WHERE uploader_id=? AND created_at>=?').get(req.user.id,new Date(Date.now()-86400000).toISOString()).n>=50)fail(429,'Limite de envios atingido. Tente mais tarde.');
+  db.prepare('INSERT INTO private_documents(id,worker_id,uploader_id,kind,period,mime,content,created_at) VALUES (?,?,?,?,?,?,?,?)').run(docId,workerId,req.user.id,kind,period,mime,bytes,created);
+  audit(req.user.id,'private_document_uploaded',docId,kind);
+ })();
+ changed('documents',workerId);res.status(201).json({id:docId});
+};
+app.get('/api/worker/documents',auth,workerOnly,requireDocuments,wrap((req,res)=>res.json({documents:db.prepare('SELECT '+docMeta+' FROM private_documents WHERE worker_id=? ORDER BY created_at DESC LIMIT 200').all(req.user.id)})));
+app.post('/api/worker/documents',auth,workerOnly,requireDocuments,documentJson,wrap((req,res)=>addDocument(req,res,req.user.id,'medical')));
+app.get('/api/admin/workers/:id/documents',auth,admin,requireDocuments,wrap((req,res)=>{
+ if(!db.prepare("SELECT id FROM users WHERE id=? AND role='worker'").get(req.params.id))fail(404,'Funcionário não encontrado.');
+ res.json({documents:db.prepare('SELECT '+docMeta+' FROM private_documents WHERE worker_id=? ORDER BY created_at DESC LIMIT 200').all(req.params.id)});
+}));
+app.post('/api/admin/workers/:id/documents',auth,admin,requireDocuments,documentJson,wrap((req,res)=>{
+ if(!db.prepare("SELECT id FROM users WHERE id=? AND role='worker' AND active=1").get(req.params.id))fail(404,'Funcionário ativo não encontrado.');
+ addDocument(req,res,req.params.id,'payslip');
+}));
+app.get('/api/documents/:id/download',auth,requireDocuments,wrap((req,res)=>{
+ const doc=db.prepare('SELECT * FROM private_documents WHERE id=? AND (?=\'admin\' OR worker_id=?)').get(req.params.id,req.user.role,req.user.id);
+ if(!doc)fail(404,'Documento não encontrado.');
+ const ext=doc.mime==='application/pdf'?'pdf':doc.mime==='image/png'?'png':'jpg';
+ const name=doc.kind==='payslip'?'holerite-'+doc.period:'atestado-'+doc.id.slice(0,8);
+ audit(req.user.id,'private_document_downloaded',doc.id,doc.kind);
+ res.set('X-Content-Type-Options','nosniff');res.attachment(name+'.'+ext);res.type(doc.mime).send(doc.content);
+}));
+app.patch('/api/admin/documents/:id/status',auth,admin,requireDocuments,wrap((req,res)=>{
+ const doc=db.prepare("SELECT id,worker_id FROM private_documents WHERE id=? AND kind='medical'").get(req.params.id);
+ if(!doc)fail(404,'Atestado não encontrado.');
+ const status=req.body.status;if(!['reviewed','rejected'].includes(status))fail(400,'Situação inválida.');
+ db.prepare('UPDATE private_documents SET status=?,reviewed_at=? WHERE id=?').run(status,now(),doc.id);
+ audit(req.user.id,'private_document_reviewed',doc.id,status);changed('documents',doc.worker_id);res.json({ok:true});
 }));
 app.post('/api/worker/requests',auth,wrap((req,res)=>{
  if(req.user.role!=='worker')fail(403,'Somente funcionários.');
