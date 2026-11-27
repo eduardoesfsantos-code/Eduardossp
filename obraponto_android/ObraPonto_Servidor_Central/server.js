@@ -7,7 +7,7 @@ import { Server } from 'socket.io';
 import Database from 'better-sqlite3';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomInt, createHmac, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -59,6 +59,12 @@ CREATE TABLE IF NOT EXISTS requests (
  day TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
  admin_note TEXT DEFAULT '', created_at TEXT NOT NULL, decided_at TEXT
 );
+CREATE TABLE IF NOT EXISTS email_verification (
+ user_id TEXT PRIMARY KEY REFERENCES users(id),
+ email TEXT NOT NULL, nonce TEXT NOT NULL, digest TEXT NOT NULL,
+ expires_at INTEGER NOT NULL, sent_at INTEGER NOT NULL,
+ window_start INTEGER NOT NULL, send_count INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS privacy_requests (
  id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
  kind TEXT NOT NULL CHECK(kind IN ('access','correction','deletion')),
@@ -106,6 +112,7 @@ INSERT OR IGNORE INTO company_profile (id,trade_name,updated_at) VALUES (1,'Minh
 if(!db.pragma('table_info(users)').some(c=>c.name==='archived_at')) {
  db.exec('ALTER TABLE users ADD COLUMN archived_at TEXT');
 }
+if(!db.pragma('table_info(users)').some(c=>c.name==='email_verified_at'))db.exec('ALTER TABLE users ADD COLUMN email_verified_at TEXT');
 const companyProfile=()=>{
  const row=db.prepare('SELECT * FROM company_profile WHERE id=1').get();
  return {...row,allow_worker_select_site:!!row.allow_worker_select_site,allow_worker_requests:!!row.allow_worker_requests};
@@ -119,7 +126,7 @@ const str = (value, max = 180) => typeof value === 'string' ? value.trim().slice
 const required = (value, label, max=180) => str(value,max) || fail(400, `${label} é obrigatório.`);
 const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(new Date(`${s}T12:00:00Z`).getTime());
 const dayParam = (v, fallback=today()) => {const s = str(v,10)||fallback; if(!isDate(s)) fail(400,'Data inválida.'); return s;};
-const safeUser = u => u && ({id:u.id,name:u.name,email:u.email,phone:u.phone,employee_code:u.employee_code,trade:u.trade,role:u.role,active:!!u.active,created_at:u.created_at,archived_at:u.archived_at||null});
+const safeUser = u => u && ({id:u.id,name:u.name,email:u.email,phone:u.phone,employee_code:u.employee_code,trade:u.trade,role:u.role,active:!!u.active,created_at:u.created_at,archived_at:u.archived_at||null,email_verified:!!u.email_verified_at});
 const audit = (actorId, action, objectId='', detail='') => db.prepare('INSERT INTO audit VALUES (?,?,?,?,?,?)').run(id(),actorId,action,objectId,String(detail).slice(0,500),now());
 const secret = process.env.JWT_SECRET;
 if (!secret || secret.length < 32 || secret.includes('SUBSTITUA')) {
@@ -177,6 +184,63 @@ app.post('/api/login',rateLimit({windowMs:15*60*1000,limit:20,standardHeaders:'d
  res.json({token,user:safeUser(user)});
 }));
 app.get('/api/me',auth,(req,res)=>res.json({user:safeUser(req.user),today:today(),server_time:now()}));
+
+const mailReady=()=>!!(process.env.RESEND_API_KEY&&process.env.OBRAPONTO_EMAIL_FROM);
+const emailDigest=(uid,email,nonce,code)=>createHmac('sha256',secret).update(JSON.stringify([uid,email,nonce,code])).digest('hex');
+const workerOnly=(req,res,next)=>req.user.role==='worker'?next():res.status(403).json({error:'Somente funcionários.'});
+const verificationLimit=rateLimit({windowMs:15*60*1000,limit:60,standardHeaders:'draft-8',legacyHeaders:false});
+app.get('/api/worker/email-verification',auth,workerOnly,wrap((req,res)=>{
+ const pending=db.prepare('SELECT sent_at FROM email_verification WHERE user_id=?').get(req.user.id);
+ res.json({email:req.user.email,verified:!!req.user.email_verified_at,available:mailReady(),retry_after:pending?Math.max(0,Math.ceil((pending.sent_at+60000-Date.now())/1000)):0});
+}));
+app.post('/api/worker/email-verification/send',auth,workerOnly,verificationLimit,wrap(async(req,res)=>{
+ if(!mailReady())fail(503,'Envio de e-mail ainda não configurado. Seu ponto continua disponível.');
+ const code=String(randomInt(0,1000000)).padStart(6,'0'),nonce=id(),t=Date.now();
+ const destination=db.transaction(()=>{
+  const u=db.prepare('SELECT email,email_verified_at FROM users WHERE id=? AND active=1').get(req.user.id);
+  if(!u)fail(401,'Sessão inválida.');
+  if(u.email_verified_at)fail(409,'E-mail já confirmado.');
+  const old=db.prepare('SELECT * FROM email_verification WHERE user_id=?').get(req.user.id);
+  if(old&&t-old.sent_at<60000)fail(429,'Aguarde um minuto antes de reenviar.');
+  const sameWindow=old&&t-old.window_start<24*60*60*1000;
+  const count=sameWindow?old.send_count:0;
+  if(count>=5)fail(429,'Limite diário de reenvios atingido. Tente novamente mais tarde.');
+  db.prepare('INSERT INTO email_verification (user_id,email,nonce,digest,expires_at,sent_at,window_start,send_count,attempts) VALUES (?,?,?,?,?,?,?,?,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,nonce=excluded.nonce,digest=excluded.digest,expires_at=excluded.expires_at,sent_at=excluded.sent_at,window_start=excluded.window_start,send_count=excluded.send_count,attempts=0').run(req.user.id,u.email,nonce,emailDigest(req.user.id,u.email,nonce,code),t+10*60*1000,t,sameWindow?old.window_start:t,count+1);
+  return u.email;
+ })();
+ try{
+  const response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:'Bearer '+process.env.RESEND_API_KEY,'Content-Type':'application/json','Idempotency-Key':'obraponto-email-'+nonce},body:JSON.stringify({from:process.env.OBRAPONTO_EMAIL_FROM,to:[destination],subject:'ObraPonto — confirme seu e-mail',text:'Seu código de confirmação é '+code+'. Ele expira em 10 minutos. Não compartilhe este código. Se você não solicitou, ignore esta mensagem.'}),signal:AbortSignal.timeout(10000)});
+  if(!response.ok)throw Error('Falha do provedor de e-mail.');
+ }catch{
+  db.prepare('UPDATE email_verification SET expires_at=0,digest=? WHERE user_id=? AND nonce=?').run('',req.user.id,nonce);
+  fail(503,'Não foi possível enviar o código. Tente novamente mais tarde.');
+ }
+ audit(req.user.id,'email_verification_sent',req.user.id);
+ res.json({ok:true,expires_in:600,retry_after:60});
+}));
+app.post('/api/worker/email-verification/confirm',auth,workerOnly,verificationLimit,wrap((req,res)=>{
+ const code=typeof req.body.code==='string'?req.body.code.trim():'';
+ if(!/^\d{6}$/.test(code))fail(400,'Informe os seis dígitos do código.');
+ const result=db.transaction(()=>{
+  const u=db.prepare('SELECT email,email_verified_at FROM users WHERE id=? AND active=1').get(req.user.id);
+  if(!u)return 'invalid';
+  if(u.email_verified_at)return 'verified';
+  const c=db.prepare('SELECT * FROM email_verification WHERE user_id=?').get(req.user.id);
+  if(!c||c.email!==u.email||c.expires_at<=Date.now()||c.attempts>=5||!/^[a-f0-9]{64}$/.test(c.digest))return 'expired';
+  const correct=timingSafeEqual(Buffer.from(c.digest,'hex'),Buffer.from(emailDigest(req.user.id,u.email,c.nonce,code),'hex'));
+  if(!correct){
+   db.prepare('UPDATE email_verification SET attempts=attempts+1 WHERE user_id=?').run(req.user.id);
+   return 'incorrect';
+  }
+  db.prepare('UPDATE users SET email_verified_at=? WHERE id=? AND email=?').run(now(),req.user.id,u.email);
+  db.prepare("UPDATE email_verification SET expires_at=0,digest='' WHERE user_id=?").run(req.user.id);
+  audit(req.user.id,'email_verified',req.user.id);
+  return 'verified';
+ })();
+ if(result!=='verified')fail(400,result==='incorrect'?'Código incorreto.':'Código expirado ou indisponível. Solicite outro.');
+ changed('workers',req.user.id);res.json({ok:true,verified:true});
+}));
+
 app.get('/api/sites',auth,(_req,res)=>res.json({sites:db.prepare('SELECT id,name,city,address,active,created_at FROM sites ORDER BY active DESC,name ASC').all().map(s=>({...s,active:!!s.active}))}));
 
 // V2: dados e preferências da empresa atual. Ainda não é multiempresa.
@@ -221,7 +285,7 @@ app.patch('/api/admin/workers/:id',auth,admin,wrap((req,res)=>{
  const active=req.body.active===undefined?u.active:(req.body.active?1:0);
  const pass=req.body.password ? bcrypt.hashSync(req.body.password,12) : u.password_hash;
  if(req.body.password && req.body.password.length<8)fail(400,'Senha deve ter no mínimo 8 caracteres.');
- try {db.prepare('UPDATE users SET name=?,email=?,phone=?,employee_code=?,trade=?,active=?,password_hash=?,archived_at=? WHERE id=?').run(name,email,req.body.phone===undefined?u.phone:str(req.body.phone,30),req.body.employee_code===undefined?u.employee_code:str(req.body.employee_code,30),req.body.trade===undefined?u.trade:str(req.body.trade,90),active,pass,req.body.restore===true?null:u.archived_at,u.id);}catch(e){if(e.code?.includes('CONSTRAINT'))fail(409,'E-mail já cadastrado.');throw e;}
+ try {db.prepare('UPDATE users SET name=?,email_verified_at=CASE WHEN email=? COLLATE NOCASE THEN email_verified_at ELSE NULL END,email=?,phone=?,employee_code=?,trade=?,active=?,password_hash=?,archived_at=? WHERE id=?').run(name,email,email,req.body.phone===undefined?u.phone:str(req.body.phone,30),req.body.employee_code===undefined?u.employee_code:str(req.body.employee_code,30),req.body.trade===undefined?u.trade:str(req.body.trade,90),active,pass,req.body.restore===true?null:u.archived_at,u.id);}catch(e){if(e.code?.includes('CONSTRAINT'))fail(409,'E-mail já cadastrado.');throw e;}
  audit(req.user.id,'worker_updated',u.id,name);changed('workers',u.id);res.json({ok:true});
 }));
 // Exclusão segura = arquivamento; acesso revogado, registros históricos preservados.
