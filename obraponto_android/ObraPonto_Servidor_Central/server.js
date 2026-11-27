@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS requests (
  day TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
  admin_note TEXT DEFAULT '', created_at TEXT NOT NULL, decided_at TEXT
 );
+CREATE TABLE IF NOT EXISTS privacy_requests (
+ id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+ kind TEXT NOT NULL CHECK(kind IN ('access','correction','deletion')),
+ message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','in_review','answered')),
+ response TEXT, decided_by TEXT REFERENCES users(id), created_at TEXT NOT NULL, answered_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_privacy_requests_user ON privacy_requests(user_id,created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_privacy_request_open ON privacy_requests(user_id,kind) WHERE status IN ('pending','in_review');
 CREATE TABLE IF NOT EXISTS punch_rectifications (
  id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE REFERENCES requests(id),
  user_id TEXT NOT NULL REFERENCES users(id), day TEXT NOT NULL,
@@ -135,6 +143,7 @@ const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy',1); // Railway encaminha IP de origem por proxy.
 app.use(helmet({contentSecurityPolicy: false}));
+app.use('/api',(_req,res,next)=>{res.set('Cache-Control','private, no-store, max-age=0');res.set('Pragma','no-cache');next();});
 app.use(express.json({limit:'256kb'}));
 const http = createServer(app);
 const io = new Server(http, {cors:{origin:false}});
@@ -520,6 +529,42 @@ app.get('/api/worker/requests',auth,wrap((req,res)=>{
  res.json({requests:db.prepare('SELECT r.*,EXISTS(SELECT 1 FROM punch_rectifications c WHERE c.request_id=r.id) AS rectified FROM requests r WHERE r.user_id=? ORDER BY r.created_at DESC LIMIT 30').all(req.user.id)});
 }));
 app.get('/api/admin/requests',auth,admin,(_req,res)=>res.json({requests:db.prepare('SELECT r.*,u.name AS worker_name,EXISTS(SELECT 1 FROM punch_rectifications c WHERE c.request_id=r.id) AS rectified FROM requests r JOIN users u ON r.user_id=u.id ORDER BY (r.status=\'pending\') DESC,r.created_at DESC LIMIT 100').all()}));
+
+
+const privacyKinds=['access','correction','deletion'];
+app.get('/api/privacy/requests',auth,wrap((req,res)=>{
+ res.json({requests:db.prepare('SELECT id,kind,message,status,response,created_at,answered_at FROM privacy_requests WHERE user_id=? ORDER BY created_at DESC LIMIT 50').all(req.user.id)});
+}));
+app.post('/api/privacy/requests',auth,wrap((req,res)=>{
+ const kind=str(req.body.kind,20),message=str(req.body.message,1000);
+ if(!privacyKinds.includes(kind))fail(400,'Tipo de solicitação inválido.');
+ if(message.length<5)fail(400,'Descreva a solicitação.');
+ const rid=db.transaction(()=>{
+  if(db.prepare("SELECT id FROM privacy_requests WHERE user_id=? AND kind=? AND status IN ('pending','in_review')").get(req.user.id,kind))fail(409,'Já existe uma solicitação deste tipo em atendimento.');
+  const rid=id();
+  db.prepare('INSERT INTO privacy_requests (id,user_id,kind,message,created_at) VALUES (?,?,?,?,?)').run(rid,req.user.id,kind,message,now());
+  audit(req.user.id,'privacy_request_created',rid,kind);
+  return rid;
+ })();
+ changed('privacy',req.user.id);res.status(201).json({id:rid});
+}));
+app.get('/api/admin/privacy/requests',auth,admin,wrap((_req,res)=>{
+ res.json({requests:db.prepare("SELECT p.*,u.name AS user_name FROM privacy_requests p JOIN users u ON u.id=p.user_id ORDER BY (p.status='pending') DESC,p.created_at DESC LIMIT 200").all()});
+}));
+app.patch('/api/admin/privacy/requests/:id',auth,admin,wrap((req,res)=>{
+ const result=db.transaction(()=>{
+  const p=db.prepare('SELECT * FROM privacy_requests WHERE id=?').get(req.params.id);
+  if(!p)fail(404,'Solicitação não encontrada.');
+  if(p.status==='answered')fail(409,'Solicitação já respondida.');
+  const status=str(req.body.status,20),response=str(req.body.response,2000);
+  if(!['in_review','answered'].includes(status))fail(400,'Situação inválida.');
+  if(status==='answered'&&response.length<10)fail(400,'Registre a resposta e as providências adotadas.');
+  db.prepare('UPDATE privacy_requests SET status=?,response=?,decided_by=?,answered_at=? WHERE id=?').run(status,response,req.user.id,status==='answered'?now():null,p.id);
+  audit(req.user.id,'privacy_request_processed',p.id,status);
+  return p;
+ })();
+ changed('privacy',result.user_id);res.json({ok:true});
+}));
 
 app.get('/api/admin/requests/:id/rectification',auth,admin,wrap((req,res)=>{
  const r=db.prepare('SELECT * FROM requests WHERE id=?').get(req.params.id);
