@@ -113,6 +113,14 @@ if(!db.pragma('table_info(users)').some(c=>c.name==='archived_at')) {
  db.exec('ALTER TABLE users ADD COLUMN archived_at TEXT');
 }
 if(!db.pragma('table_info(users)').some(c=>c.name==='email_verified_at'))db.exec('ALTER TABLE users ADD COLUMN email_verified_at TEXT');
+if(!db.pragma('table_info(users)').some(c=>c.name==='photo_data_url'))db.exec("ALTER TABLE users ADD COLUMN photo_data_url TEXT NOT NULL DEFAULT ''");
+if(!db.pragma('table_info(users)').some(c=>c.name==='shift'))db.exec("ALTER TABLE users ADD COLUMN shift TEXT NOT NULL DEFAULT 'unspecified'");
+db.exec(`CREATE TABLE IF NOT EXISTS worker_notices (
+ id TEXT PRIMARY KEY, worker_id TEXT NOT NULL REFERENCES users(id),
+ sender_id TEXT NOT NULL REFERENCES users(id), message TEXT NOT NULL,
+ created_at TEXT NOT NULL, read_at TEXT
+);
+CREATE INDEX IF NOT EXISTS worker_notices_recipient ON worker_notices(worker_id,created_at);`);
 const companyProfile=()=>{
  const row=db.prepare('SELECT * FROM company_profile WHERE id=1').get();
  return {...row,allow_worker_select_site:!!row.allow_worker_select_site,allow_worker_requests:!!row.allow_worker_requests};
@@ -126,7 +134,20 @@ const str = (value, max = 180) => typeof value === 'string' ? value.trim().slice
 const required = (value, label, max=180) => str(value,max) || fail(400, `${label} é obrigatório.`);
 const isDate = s => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(new Date(`${s}T12:00:00Z`).getTime());
 const dayParam = (v, fallback=today()) => {const s = str(v,10)||fallback; if(!isDate(s)) fail(400,'Data inválida.'); return s;};
-const safeUser = u => u && ({id:u.id,name:u.name,email:u.email,phone:u.phone,employee_code:u.employee_code,trade:u.trade,role:u.role,active:!!u.active,created_at:u.created_at,archived_at:u.archived_at||null,email_verified:!!u.email_verified_at});
+const workerShift=value=>{
+ if(!['unspecified','day','night','mixed'].includes(value))fail(400,'Turno inválido.');
+ return value;
+};
+const workerPhoto=value=>{
+ if(value==='')return '';
+ if(typeof value!=='string'||!/^data:image\/(jpeg|png);base64,[A-Za-z0-9+/]+={0,2}$/.test(value))fail(400,'Selecione uma foto JPG ou PNG.');
+ const [head,b64]=value.split(','),buf=Buffer.from(b64,'base64');
+ const png=buf.length>=24&&buf.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))&&buf.subarray(12,16).toString()==='IHDR';
+ const jpg=buf.length>4&&buf[0]===255&&buf[1]===216&&buf[2]===255&&buf[buf.length-2]===255&&buf[buf.length-1]===217;
+ if(buf.length>100000||!(head.includes('png')?png:jpg))fail(400,'Foto inválida ou acima de 100 KB.');
+ return value;
+};
+const safeUser = u => u && ({id:u.id,name:u.name,email:u.email,phone:u.phone,employee_code:u.employee_code,trade:u.trade,role:u.role,active:!!u.active,created_at:u.created_at,archived_at:u.archived_at||null,email_verified:!!u.email_verified_at,photo_data_url:u.photo_data_url||'',shift:u.shift||'unspecified'});
 const audit = (actorId, action, objectId='', detail='') => db.prepare('INSERT INTO audit VALUES (?,?,?,?,?,?)').run(id(),actorId,action,objectId,String(detail).slice(0,500),now());
 const secret = process.env.JWT_SECRET;
 if (!secret || secret.length < 32 || secret.includes('SUBSTITUA')) {
@@ -169,7 +190,7 @@ const wrap = fn => (req,res,next) => {try {const result=fn(req,res); if(result?.
 const changed = (resource, workerId=null) => {
  io.to('admins').emit('changed',{resource});
  if(workerId) io.to(`worker:${workerId}`).emit('changed',{resource});
- if(resource==='sites') io.to('workers').emit('changed',{resource});
+ if(resource==='sites'||resource==='company') io.to('workers').emit('changed',{resource});
 };
 io.use((socket,next)=>{
  try {const p=jwt.verify(socket.handshake.auth?.token||'',secret,{algorithms:['HS256']}); const u=db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(p.sub); if(!u)throw Error('unauthorized'); socket.data.user=u; next();} catch{next(new Error('Não autorizado'));}
@@ -244,6 +265,9 @@ app.post('/api/worker/email-verification/confirm',auth,workerOnly,verificationLi
 app.get('/api/sites',auth,(_req,res)=>res.json({sites:db.prepare('SELECT id,name,city,address,active,created_at FROM sites ORDER BY active DESC,name ASC').all().map(s=>({...s,active:!!s.active}))}));
 
 // V2: dados e preferências da empresa atual. Ainda não é multiempresa.
+app.get('/api/company/branding',auth,(_req,res)=>{
+ const {trade_name,logo_data_url}=companyProfile();res.json({trade_name,logo_data_url});
+});
 app.get('/api/admin/company',auth,admin,(_req,res)=>res.json({company:companyProfile()}));
 app.patch('/api/admin/company',auth,admin,wrap((req,res)=>{
  const current=companyProfile();
@@ -271,8 +295,8 @@ app.post('/api/admin/workers',auth,admin,wrap((req,res)=>{
  const name=required(req.body.name,'Nome'), email=required(req.body.email,'E-mail').toLowerCase();
  const password=req.body.password||''; if(!/^\S+@\S+\.\S+$/.test(email))fail(400,'E-mail inválido.');
  if(password.length<8)fail(400,'Senha deve ter no mínimo 8 caracteres.');
- const uid=id();
- try{db.prepare("INSERT INTO users (id,name,email,phone,employee_code,trade,role,password_hash,created_at) VALUES (?,?,?,?,?,?,'worker',?,?)").run(uid,name,email,str(req.body.phone,30),str(req.body.employee_code,30),str(req.body.trade,90),bcrypt.hashSync(password,12),now());}
+ const uid=id(),photo=workerPhoto(req.body.photo_data_url??''),shift=workerShift(req.body.shift??'unspecified');
+ try{db.prepare("INSERT INTO users (id,name,email,phone,employee_code,trade,role,password_hash,created_at,photo_data_url,shift) VALUES (?,?,?,?,?,?,'worker',?,?,?,?)").run(uid,name,email,str(req.body.phone,30),str(req.body.employee_code,30),str(req.body.trade,90),bcrypt.hashSync(password,12),now(),photo,shift);}
  catch(e){if(e.code?.includes('CONSTRAINT'))fail(409,'E-mail já cadastrado.');throw e;}
  audit(req.user.id,'worker_created',uid,name); changed('workers');res.status(201).json({worker:safeUser(db.prepare('SELECT * FROM users WHERE id=?').get(uid))});
 }));
@@ -284,8 +308,10 @@ app.patch('/api/admin/workers/:id',auth,admin,wrap((req,res)=>{
  if(!/^\S+@\S+\.\S+$/.test(email))fail(400,'E-mail inválido.');
  const active=req.body.active===undefined?u.active:(req.body.active?1:0);
  const pass=req.body.password ? bcrypt.hashSync(req.body.password,12) : u.password_hash;
+ const photo=req.body.photo_data_url===undefined?u.photo_data_url:workerPhoto(req.body.photo_data_url);
+ const shift=req.body.shift===undefined?u.shift:workerShift(req.body.shift);
  if(req.body.password && req.body.password.length<8)fail(400,'Senha deve ter no mínimo 8 caracteres.');
- try {db.prepare('UPDATE users SET name=?,email_verified_at=CASE WHEN email=? COLLATE NOCASE THEN email_verified_at ELSE NULL END,email=?,phone=?,employee_code=?,trade=?,active=?,password_hash=?,archived_at=? WHERE id=?').run(name,email,email,req.body.phone===undefined?u.phone:str(req.body.phone,30),req.body.employee_code===undefined?u.employee_code:str(req.body.employee_code,30),req.body.trade===undefined?u.trade:str(req.body.trade,90),active,pass,req.body.restore===true?null:u.archived_at,u.id);}catch(e){if(e.code?.includes('CONSTRAINT'))fail(409,'E-mail já cadastrado.');throw e;}
+ try {db.prepare('UPDATE users SET name=?,email_verified_at=CASE WHEN email=? COLLATE NOCASE THEN email_verified_at ELSE NULL END,email=?,phone=?,employee_code=?,trade=?,active=?,password_hash=?,archived_at=?,photo_data_url=?,shift=? WHERE id=?').run(name,email,email,req.body.phone===undefined?u.phone:str(req.body.phone,30),req.body.employee_code===undefined?u.employee_code:str(req.body.employee_code,30),req.body.trade===undefined?u.trade:str(req.body.trade,90),active,pass,req.body.restore===true?null:u.archived_at,photo,shift,u.id);}catch(e){if(e.code?.includes('CONSTRAINT'))fail(409,'E-mail já cadastrado.');throw e;}
  audit(req.user.id,'worker_updated',u.id,name);changed('workers',u.id);res.json({ok:true});
 }));
 // Exclusão segura = arquivamento; acesso revogado, registros históricos preservados.
@@ -300,8 +326,21 @@ app.post('/api/admin/sites',auth,admin,wrap((req,res)=>{
  db.prepare('INSERT INTO sites VALUES (?,?,?,?,?,?)').run(sid,name,city,str(req.body.address,200),1,now());
  audit(req.user.id,'site_created',sid,name);changed('sites');res.status(201).json({id:sid});
 }));
+// Arquivamento reversível; registros de ponto e alocações anteriores permanecem intactos.
+const ensureSiteCanArchive=siteId=>{
+ if(db.prepare("SELECT 1 FROM assignments a JOIN users u ON u.id=a.worker_id WHERE a.site_id=? AND a.day>=? AND u.active=1 LIMIT 1").get(siteId,today()))fail(409,'Realoque os funcionários com alocação de hoje ou futura antes de arquivar a obra.');
+ const recent=db.prepare("SELECT p.* FROM punches p JOIN users u ON u.id=p.user_id WHERE u.active=1 AND p.day>=? ORDER BY p.at,p.rowid").all(dateBR(new Date(Date.now()-86400000)));
+ const last=new Map();for(const p of recent)last.set(p.user_id+'|'+p.day,p);
+ if([...last.values()].some(p=>p.site_id===siteId&&p.type!=='out'))fail(409,'Há uma jornada em aberto nesta obra. Finalize ou regularize o ponto antes de arquivar.');
+};
+app.delete('/api/admin/sites/:id',auth,admin,wrap((req,res)=>{
+ const site=db.prepare('SELECT * FROM sites WHERE id=?').get(req.params.id);if(!site)fail(404,'Obra não encontrada.');
+ if(site.active){ensureSiteCanArchive(site.id);db.prepare('UPDATE sites SET active=0 WHERE id=?').run(site.id);audit(req.user.id,'site_archived',site.id);changed('sites');}
+ res.json({ok:true,archived:true});
+}));
 app.patch('/api/admin/sites/:id',auth,admin,wrap((req,res)=>{
  const s=db.prepare('SELECT * FROM sites WHERE id=?').get(req.params.id);if(!s)fail(404,'Obra não encontrada.');
+ if(s.active&&req.body.active===false)ensureSiteCanArchive(s.id);
  db.prepare('UPDATE sites SET name=?,city=?,address=?,active=? WHERE id=?').run(req.body.name===undefined?s.name:required(req.body.name,'Nome da obra'),req.body.city===undefined?s.city:required(req.body.city,'Cidade'),req.body.address===undefined?s.address:str(req.body.address,200),req.body.active===undefined?s.active:(req.body.active?1:0),s.id);
  audit(req.user.id,'site_updated',s.id);changed('sites');res.json({ok:true});
 }));
@@ -574,14 +613,33 @@ app.get('/api/admin/report',auth,admin,wrap((req,res)=>{
 }));
 app.get('/api/admin/dashboard',auth,admin,wrap((_req,res)=>{
  const day=today();
- const workers=db.prepare("SELECT id,name,trade,active FROM users WHERE role='worker' AND active=1 ORDER BY name").all();
+ const workers=db.prepare("SELECT id,name,trade,active,shift FROM users WHERE role='worker' AND active=1 ORDER BY name").all();
  const assignments=db.prepare('SELECT a.worker_id,a.site_id,s.name AS site_name,s.city AS site_city FROM assignments a JOIN sites s ON s.id=a.site_id WHERE a.day=?').all(day);
  const punches=db.prepare('SELECT p.*,s.name AS site_name,s.city AS site_city FROM punches p JOIN sites s ON p.site_id=s.id WHERE p.day=? ORDER BY p.at').all(day);
- const overview=workers.map(w=>{const own=punches.filter(p=>p.user_id===w.id),last=own.at(-1),assignment=assignments.find(a=>a.worker_id===w.id);const site=last||assignment;return {...w,site_name:site?.site_name||'Sem obra',site_city:site?.site_city||'',last_type:last?.type||null,last_at:last?.at||null,minutes:duration(own,!!last&&last.type!=='out'),status:!last?'Não iniciou':last.type==='out'?'Finalizado':last.type==='break_start'?'Em intervalo':'Em serviço'};});
+ const overview=workers.map(w=>{const own=punches.filter(p=>p.user_id===w.id),last=own.at(-1),assignment=assignments.find(a=>a.worker_id===w.id);const site=last||assignment;return {...w,site_id:site?.site_id||null,site_name:site?.site_name||'Sem obra',site_city:site?.site_city||'',last_type:last?.type||null,last_at:last?.at||null,minutes:duration(own,!!last&&last.type!=='out'),status:!last?'Não iniciou':last.type==='out'?'Finalizado':last.type==='break_start'?'Em intervalo':'Em serviço'};});
  const activity=db.prepare('SELECT p.*,u.name AS worker_name,s.name AS site_name,s.city AS site_city FROM punches p JOIN users u ON u.id=p.user_id JOIN sites s ON s.id=p.site_id ORDER BY p.at DESC LIMIT 12').all();
  res.json({day,overview,activity,stats:{employees:workers.length,present:overview.filter(w=>w.last_type&&w.last_type!=='out').length,completed:overview.filter(w=>w.last_type==='out').length,missing:overview.filter(w=>!w.last_type).length,sites:db.prepare('SELECT COUNT(*) AS n FROM sites WHERE active=1').get().n,punchesToday:punches.length,pendingRequests:db.prepare("SELECT COUNT(*) AS n FROM requests WHERE status='pending'").get().n}});
 }));
 
+// Avisos internos individuais; sem envio de dados a provedores de push.
+app.post('/api/admin/workers/:id/notices',auth,admin,wrap((req,res)=>{
+ const worker=db.prepare("SELECT id FROM users WHERE id=? AND role='worker' AND active=1").get(req.params.id);
+ if(!worker)fail(404,'Funcionário ativo não encontrado.');
+ const message=required(req.body.message,'Mensagem',1000),noticeId=id();
+ db.prepare('INSERT INTO worker_notices(id,worker_id,sender_id,message,created_at) VALUES (?,?,?,?,?)').run(noticeId,worker.id,req.user.id,message,now());
+ audit(req.user.id,'worker_notice_sent',noticeId,worker.id);changed('notices',worker.id);res.status(201).json({id:noticeId});
+}));
+app.get('/api/admin/workers/:id/notices',auth,admin,wrap((req,res)=>{
+ res.json({notices:db.prepare('SELECT id,message,created_at,read_at FROM worker_notices WHERE worker_id=? ORDER BY created_at DESC LIMIT 100').all(req.params.id)});
+}));
+app.get('/api/worker/notices',auth,workerOnly,wrap((req,res)=>{
+ res.json({notices:db.prepare('SELECT id,message,created_at,read_at FROM worker_notices WHERE worker_id=? ORDER BY created_at DESC LIMIT 100').all(req.user.id),unread:db.prepare('SELECT COUNT(*) n FROM worker_notices WHERE worker_id=? AND read_at IS NULL').get(req.user.id).n});
+}));
+app.patch('/api/worker/notices/:id/read',auth,workerOnly,wrap((req,res)=>{
+ const notice=db.prepare('SELECT id,read_at FROM worker_notices WHERE id=? AND worker_id=?').get(req.params.id,req.user.id);if(!notice)fail(404,'Aviso não encontrado.');
+ if(!notice.read_at){db.prepare('UPDATE worker_notices SET read_at=? WHERE id=? AND worker_id=?').run(now(),notice.id,req.user.id);changed('notices',req.user.id);}
+ res.json({ok:true});
+}));
 app.post('/api/worker/requests',auth,wrap((req,res)=>{
  if(req.user.role!=='worker')fail(403,'Somente funcionários.');
  if(!companyProfile().allow_worker_requests)fail(403,'Novas solicitações estão desativadas.');
