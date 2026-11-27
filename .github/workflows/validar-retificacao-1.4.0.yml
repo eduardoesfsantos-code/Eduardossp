@@ -2,6 +2,8 @@ name: Validar PDF e retificação ObraPonto 1.4.0
 on:
   push:
     branches: [feature/relatorio-pdf-1.4.0]
+  pull_request:
+    branches: [homologacao/rc4-visual]
   workflow_dispatch:
 permissions:
   contents: read
