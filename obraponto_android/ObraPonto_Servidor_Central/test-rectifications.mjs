@@ -211,6 +211,38 @@ try{
  await call('/admin/work-orders/'+order2.id+'/cancel',admin,'PATCH',{});
  await call('/worker/work-orders/'+order2.id+'/status',worker,'PATCH',{status:'accepted'},409);
  assert.equal((await call('/worker/work-orders',worker)).orders.find(o=>o.id===order2.id).status,'cancelled');
+ // Central de notificações: eventos reais derivados dos registros e leitura individual.
+ const feed=(await call('/notifications',worker));
+ assert.ok(feed.unread>0);
+ assert.ok(feed.notifications.some(n=>n.id==='notice:'+notice));
+ assert.ok(feed.notifications.some(n=>n.id==='document:'+timesheet&&n.target==='documents'));
+ assert.ok(feed.notifications.some(n=>n.id.startsWith('document-reviewed:'+medical+':')));
+ assert.ok(feed.notifications.some(n=>n.id.startsWith('request-reviewed:'+rid+':')));
+ const adminFeed=(await call('/notifications',admin));
+ assert.ok(adminFeed.notifications.some(n=>n.id==='order-completed:'+order.id));
+ assert.ok(adminFeed.notifications.some(n=>n.id==='document:'+medical));
+ assert.ok(adminFeed.notifications.some(n=>n.id==='notice-ack:'+notice));
+ const otherFeed=(await call('/notifications',other));
+ assert.equal(otherFeed.notifications.length,0);
+ await call('/notifications/read',other,'PATCH',{ids:['document:'+timesheet]},404);
+ await call('/notifications/read',worker,'PATCH',{ids:['order-completed:'+order.id]},404);
+ await call('/notifications/read',worker,'PATCH',{ids:['document:'+timesheet]});
+ const readFeed=await call('/notifications',worker);
+ assert.equal(readFeed.unread,feed.unread-1);
+ assert.ok(readFeed.notifications.find(n=>n.id==='document:'+timesheet).read_at);
+ await call('/notifications/read',worker,'PATCH',{ids:['document:'+timesheet]});
+ assert.equal((await call('/notifications',worker)).unread,readFeed.unread);
+ const nextNotice=(await call('/admin/workers/'+workerId+'/notices',admin,'POST',{message:'Teste de leitura separada.'},201)).id;
+ const pending=(await call('/notifications',worker)).notifications.filter(n=>!n.read_at).map(n=>n.id);
+ await call('/notifications/read',worker,'PATCH',{ids:pending});
+ assert.equal((await call('/notifications',worker)).unread,0);
+ assert.ok(!(await call('/worker/notices',worker)).notices.find(n=>n.id===nextNotice).read_at);
+ await call('/worker/notices/'+nextNotice+'/read',worker,'PATCH',{});
+ assert.ok((await call('/notifications',admin)).notifications.some(n=>n.id==='notice-ack:'+nextNotice));
+ assert.equal((await call('/notifications',other)).unread,0);
+ await call('/notifications/read',admin,'PATCH',{ids:['order-completed:'+order.id]});
+ assert.ok((await call('/notifications',admin)).notifications.find(n=>n.id==='order-completed:'+order.id).read_at);
+
  assert.deepEqual(db.prepare('SELECT * FROM punches WHERE user_id=?').all(workerId),before);
  assert.ok(!(await call(history,other)).rows.some(r=>r.worker_id===workerId));
  await call('/admin/privacy/requests/'+privacy.id,other,'PATCH',{status:'answered',response:'Não permitido.'},403);
@@ -221,7 +253,7 @@ try{
  assert.deepEqual(db.prepare('SELECT * FROM punches WHERE user_id=?').all(workerId),before);
  const noCache=await fetch(base+'/api/me',{headers:{Authorization:'Bearer '+worker}});
  assert.match(noCache.headers.get('cache-control')||'',/no-store/);
- console.log('OK: backup pré-migração, retificação, PDF, Excel, privacidade, foto, turno, logo, arquivamento, avisos, folhas de ponto, atestados e ordens de serviço fictícias; isolamento entre contas no ambiente monoempresa.');
+ console.log('OK: backup pré-migração, retificação, PDF, Excel, privacidade, foto, turno, logo, arquivamento, avisos, folhas de ponto, atestados, ordens de serviço e central de notificações fictícias; isolamento entre contas no ambiente monoempresa.');
 }finally{
  db?.close();
  if(server.exitCode===null){const exited=new Promise(r=>server.once('exit',r));server.kill();await exited;}
