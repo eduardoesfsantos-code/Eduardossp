@@ -142,17 +142,48 @@ try{
  await call('/worker/documents',worker,'POST',{data_url:'data:application/pdf;base64,AAAA'},400);
  await call('/admin/workers/'+workerId+'/documents',other,'POST',{data_url,period:'2026-11'},403);
  const medical=(await call('/worker/documents',worker,'POST',{data_url},201)).id;
- const payslip=(await call('/admin/workers/'+workerId+'/documents',admin,'POST',{data_url,period:'2026-11'},201)).id;
+ const period=today.slice(0,7);
+ await call('/admin/workers/'+workerId+'/documents',admin,'POST',{data_url,period},400);
+ await call('/admin/workers/'+workerId+'/documents',admin,'POST',{data_url,period:'9999-12',closed:true},400);
+ const timesheet=(await call('/admin/workers/'+workerId+'/documents',admin,'POST',{data_url,period,closed:true},201)).id;
+ // Holerite legado nunca deve aparecer como folha de ponto nem ser entregue pela rota nova.
+ db.prepare("INSERT INTO private_documents(id,worker_id,uploader_id,kind,period,mime,content,created_at) VALUES (?,?,?,'payslip',?,?,?,?)").run('legacy-payslip',workerId,workerId,period,'application/pdf',pdf,new Date().toISOString());
+ await call('/documents/legacy-payslip/download',worker,'GET',undefined,404);
  const documents=(await call('/worker/documents',worker)).documents;
- assert.equal(documents.length,2);assert.ok(documents.every(d=>d.content===undefined));
+ assert.equal(documents.length,2);assert.ok(documents.every(d=>d.content===undefined));assert.equal(documents.find(d=>d.id===timesheet).kind,'timesheet');assert.equal(documents.find(d=>d.id===timesheet).period,period);
  assert.equal((await call('/worker/documents',other)).documents.length,0);
- await call('/documents/'+payslip+'/download',other,'GET',undefined,404);
+ await call('/documents/'+timesheet+'/download',other,'GET',undefined,404);
  await call('/documents/'+medical+'/download',other,'GET',undefined,404);
- assert.deepEqual(await call('/documents/'+payslip+'/download',worker),pdf);
+ assert.deepEqual(await call('/documents/'+timesheet+'/download',worker),pdf);
  assert.deepEqual(await call('/documents/'+medical+'/download',admin),pdf);
  await call('/admin/documents/'+medical+'/status',worker,'PATCH',{status:'reviewed'},403);
  await call('/admin/documents/'+medical+'/status',admin,'PATCH',{status:'reviewed'});
  assert.equal((await call('/worker/documents',worker)).documents.find(d=>d.id===medical).status,'reviewed');
+ // Ordens de serviço: destinatário, obra, transições e isolamento entre colaboradores.
+ const orderForm={worker_id:workerId,site_id:site,title:'Revisar quadro elétrico',description:'Atividade fictícia para teste.',priority:'urgent',due_day:today};
+ await call('/admin/work-orders',worker,'POST',orderForm,403);
+ await call('/admin/work-orders',admin,'POST',{...orderForm,due_day:'2026-02-30'},400);
+ await call('/admin/work-orders',admin,'POST',{...orderForm,priority:'invalid'},400);
+ const order=(await call('/admin/work-orders',admin,'POST',orderForm,201)).order;
+ assert.equal(order.status,'sent');assert.equal(order.worker_id,workerId);assert.equal(order.site_id,site);
+ assert.ok((await call('/worker/notices',worker)).notices.some(n=>n.message.includes('Nova ordem de serviço')));
+ assert.equal((await call('/worker/work-orders',other)).orders.length,0);
+ assert.equal((await call('/worker/work-orders',worker)).orders[0].id,order.id);
+ await call('/worker/work-orders/'+order.id+'/status',other,'PATCH',{status:'accepted'},404);
+ await call('/worker/work-orders/'+order.id+'/status',worker,'PATCH',{status:'completed'},409);
+ await call('/worker/work-orders/'+order.id+'/status',worker,'PATCH',{status:'accepted'});
+ await call('/worker/work-orders/'+order.id+'/status',worker,'PATCH',{status:'in_progress'});
+ await call('/worker/work-orders/'+order.id+'/status',worker,'PATCH',{status:'completed',completion_note:'Serviço fictício concluído.'});
+ const finished=(await call('/admin/work-orders',admin)).orders.find(o=>o.id===order.id);
+ assert.equal(finished.status,'completed');assert.ok(finished.accepted_at&&finished.started_at&&finished.completed_at);
+ assert.equal(finished.completion_note,'Serviço fictício concluído.');
+ await call('/admin/work-orders/'+order.id+'/cancel',admin,'PATCH',{},409);
+ const order2=(await call('/admin/work-orders',admin,'POST',orderForm,201)).order;
+ await call('/admin/work-orders/'+order2.id+'/cancel',worker,'PATCH',{},403);
+ await call('/admin/work-orders/'+order2.id+'/cancel',admin,'PATCH',{});
+ await call('/worker/work-orders/'+order2.id+'/status',worker,'PATCH',{status:'accepted'},409);
+ assert.equal((await call('/worker/work-orders',worker)).orders.find(o=>o.id===order2.id).status,'cancelled');
+ assert.deepEqual(db.prepare('SELECT * FROM punches WHERE user_id=?').all(workerId),before);
  assert.ok(!(await call(history,other)).rows.some(r=>r.worker_id===workerId));
  await call('/admin/privacy/requests/'+privacy.id,other,'PATCH',{status:'answered',response:'Não permitido.'},403);
  await call('/admin/privacy/requests/'+privacy.id,admin,'PATCH',{status:'in_review'});
@@ -162,7 +193,7 @@ try{
  assert.deepEqual(db.prepare('SELECT * FROM punches WHERE user_id=?').all(workerId),before);
  const noCache=await fetch(base+'/api/me',{headers:{Authorization:'Bearer '+worker}});
  assert.match(noCache.headers.get('cache-control')||'',/no-store/);
- console.log('OK: retificação, PDF, Excel, privacidade, foto, turno, logo, arquivamento, avisos e documentos fictícios; isolamento entre contas no ambiente monoempresa.');
+ console.log('OK: retificação, PDF, Excel, privacidade, foto, turno, logo, arquivamento, avisos, folhas de ponto, atestados e ordens de serviço fictícias; isolamento entre contas no ambiente monoempresa.');
 }finally{
  db?.close();
  if(server.exitCode===null){const exited=new Promise(r=>server.once('exit',r));server.kill();await exited;}
