@@ -35,6 +35,8 @@ jobs:
           test -n "$OBRAPONTO_SAAS_BASE_URL" || { echo "Configure a variável de repositório OBRAPONTO_SAAS_BASE_URL"; exit 1; }
           [[ "$OBRAPONTO_SAAS_BASE_URL" == https://* ]] || { echo "Domínio SaaS deve usar HTTPS"; exit 1; }
           [[ "$OBRAPONTO_SAAS_BASE_URL" != *obraponto-servidor-production.up.railway.app* ]] || { echo "Não publique apontando para o servidor legado monoempresa"; exit 1; }
+          [[ "$OBRAPONTO_SAAS_BASE_URL" != *obraponto-play-homologacao-homologacao.up.railway.app* ]] || { echo "Não publique apontando para a homologação monoempresa"; exit 1; }
+          test "${{ github.event.repository.private }}" = true || { echo "Repositório público: não gerar artefatos comerciais assinados neste fluxo."; exit 1; }
       - name: Preparar chaves privadas de upload
         shell: bash
         env:
@@ -82,11 +84,16 @@ jobs:
           jarsigner -verify "$B" > /tmp/obraponto-b.log 2>&1
           grep -qi "jar verified" /tmp/obraponto-a.log || { echo "Bundle Empresa sem assinatura validada"; exit 1; }
           grep -qi "jar verified" /tmp/obraponto-b.log || { echo "Bundle Funcionario sem assinatura validada"; exit 1; }
-          echo "Assinaturas verificadas com sucesso"
+          # Comparar com os certificados de upload aceitos anteriormente no Play.
+          EA=$(keytool -J-Duser.language=en -J-Duser.country=US -printcert -jarfile "$A" | awk '/SHA256:/{print $2;exit}')
+          FA=$(keytool -J-Duser.language=en -J-Duser.country=US -printcert -jarfile "$B" | awk '/SHA256:/{print $2;exit}')
+          [[ "$EA" == "02:0E:C9:43:32:12:02:37:F7:D4:9E:98:2D:68:9E:07:C8:4A:34:5C:C8:94:40:6E:5B:DF:9E:3A:5E:7D:37:E8" ]] || { echo "Certificado Empresa diferente do original"; exit 1; }
+          [[ "$FA" == "76:1B:BF:A7:58:64:6E:96:6A:B0:2D:5B:2F:DE:83:16:B3:C9:F0:5B:0B:CB:47:36:3D:E3:C8:6C:89:2F:3B:BD" ]] || { echo "Certificado Funcionário diferente do original"; exit 1; }
+          echo "Assinaturas e certificados originais verificados com sucesso"
       - name: Publicar AABs para download privado
         uses: actions/upload-artifact@v4
         with:
-          name: ObraPonto-AABs-ASSINADOS-V1-2
+          name: ObraPonto-AABs-ASSINADOS-1.4.0
           path: |
             obraponto_android/ObraPonto_Empresa_Android/app/build/outputs/bundle/release/app-release.aab
             obraponto_android/ObraPonto_Funcionario_Android/app/build/outputs/bundle/release/app-release.aab
