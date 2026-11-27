@@ -59,6 +59,20 @@ CREATE TABLE IF NOT EXISTS requests (
  day TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
  admin_note TEXT DEFAULT '', created_at TEXT NOT NULL, decided_at TEXT
 );
+CREATE TABLE IF NOT EXISTS punch_rectifications (
+ id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE REFERENCES requests(id),
+ user_id TEXT NOT NULL REFERENCES users(id), day TEXT NOT NULL,
+ action TEXT NOT NULL CHECK(action IN ('add','adjust','void')),
+ target_id TEXT, type TEXT NOT NULL CHECK(type IN ('in','break_start','break_end','out')),
+ site_id TEXT NOT NULL REFERENCES sites(id), previous_at TEXT, corrected_at TEXT,
+ reason TEXT NOT NULL, actor_id TEXT NOT NULL REFERENCES users(id),
+ actor_name TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rectifications_user_day ON punch_rectifications(user_id,day);
+CREATE TRIGGER IF NOT EXISTS rectifications_no_update BEFORE UPDATE ON punch_rectifications
+ BEGIN SELECT RAISE(ABORT,'Retificações não podem ser modificadas'); END;
+CREATE TRIGGER IF NOT EXISTS rectifications_no_delete BEFORE DELETE ON punch_rectifications
+ BEGIN SELECT RAISE(ABORT,'Retificações não podem ser excluídas'); END;
 CREATE TABLE IF NOT EXISTS audit (
  id TEXT PRIMARY KEY, actor_id TEXT REFERENCES users(id), action TEXT NOT NULL,
  object_id TEXT DEFAULT '', detail TEXT DEFAULT '', at TEXT NOT NULL
@@ -233,6 +247,47 @@ app.put('/api/admin/assignments',auth,admin,wrap((req,res)=>{
 
 const allPunchesForDay = (userId,day)=>db.prepare('SELECT p.*,s.name AS site_name,s.city AS site_city FROM punches p JOIN sites s ON p.site_id=s.id WHERE p.user_id=? AND p.day=? ORDER BY p.at,p.rowid').all(userId,day);
 const allowedTypes = list=> {const last=list.at(-1)?.type;return !last?['in']:last==='in'||last==='break_end'?['break_start','out']:last==='break_start'?['break_end']:[];};
+
+const rectificationSelect='SELECT c.*,s.name AS site_name,s.city AS site_city FROM punch_rectifications c JOIN sites s ON s.id=c.site_id';
+const rectificationsForDay=(userId,day)=>db.prepare(rectificationSelect+' WHERE c.user_id=? AND c.day=? ORDER BY c.rowid').all(userId,day);
+function applyRectifications(originals,changes){
+ const result=new Map(originals.map(p=>[p.id,{...p}]));
+ for(const c of changes){
+  if(c.action==='void'){result.delete(c.target_id);continue;}
+  if(c.action==='adjust'){
+   const p=result.get(c.target_id);
+   if(p)result.set(p.id,{...p,at:c.corrected_at,rectified:true});
+  }else if(c.action==='add'){
+   result.set(c.id,{id:c.id,user_id:c.user_id,day:c.day,type:c.type,site_id:c.site_id,site_name:c.site_name,site_city:c.site_city,at:c.corrected_at,created_at:c.created_at,rectified:true,manual:true});
+  }
+ }
+ return [...result.values()].sort((a,b)=>a.at.localeCompare(b.at)||a.id.localeCompare(b.id));
+}
+function validPunchSequence(list){
+ const prior=[];
+ for(const p of list){
+  if(!allowedTypes(prior).includes(p.type)||(prior.length&&p.at<=prior.at(-1).at))return false;
+  prior.push(p);
+ }
+ return true;
+}
+function localRectificationTime(day,time){
+ if(typeof time!=='string'||!/^([01]\d|2[0-3]):[0-5]\d$/.test(time))fail(400,'Informe um horário válido (HH:mm).');
+ const format=new Intl.DateTimeFormat('en-GB',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+ const desired=Date.parse(day+'T'+time+':00Z');
+ let t=desired;
+ for(let i=0;i<4;i++){
+  const parts=Object.fromEntries(format.formatToParts(new Date(t)).map(p=>[p.type,p.value]));
+  const shown=Date.parse(parts.year+'-'+parts.month+'-'+parts.day+'T'+parts.hour+':'+parts.minute+':00Z');
+  if(shown===desired)return new Date(t).toISOString();
+  t+=desired-shown;
+ }
+ fail(400,'Horário local inexistente. Escolha outro horário.');
+}
+const revisionOf=changes=>changes.at(-1)?.id||'';
+const correctionTime=ts=>ts?new Date(ts).toLocaleTimeString('pt-BR',{timeZone:'America/Sao_Paulo',hour:'2-digit',minute:'2-digit'}):'—';
+const correctionText=c=>({add:'Inclusão',adjust:'Ajuste',void:'Desconsideração'}[c.action]+' '+({in:'Entrada',break_start:'Início intervalo',break_end:'Fim intervalo',out:'Saída'}[c.type])+' ('+correctionTime(c.previous_at)+' para '+correctionTime(c.corrected_at)+') — '+c.reason+' | Responsável: '+c.actor_name+' | Registrada em '+new Date(c.created_at).toLocaleString('pt-BR',{timeZone:'America/Sao_Paulo'}));
+
 // A equipe pode selecionar uma obra diferente a cada dia. Mudanças ficam registradas.
 app.get('/api/worker/today',auth,wrap((req,res)=>{
  if(req.user.role!=='worker')fail(403,'Somente funcionários.');
@@ -280,13 +335,16 @@ function reportRows({from,to,workerId,siteId,allUsers=false}) {
  const key=(wid,day)=>`${wid}/${day}`;
  for(const p of entries){const k=key(p.user_id,p.day);if(!group.has(k))group.set(k,{worker_id:p.user_id,day:p.day,punches:[]});group.get(k).punches.push(p);}
  for(const a of assignments){const k=key(a.worker_id,a.day);if(!group.has(k))group.set(k,{worker_id:a.worker_id,day:a.day,punches:[]});group.get(k).assignment=a;}
+ const corrections=db.prepare(rectificationSelect+' WHERE c.day BETWEEN ? AND ? ORDER BY c.rowid').all(from,to);
+ for(const c of corrections){const k=key(c.user_id,c.day);if(!group.has(k))group.set(k,{worker_id:c.user_id,day:c.day,punches:[]});const g=group.get(k);(g.rectifications??=[]).push(c);}
  let rows=[];
  for(const row of group.values()){
   const u=workers.find(w=>w.id===row.worker_id);if(!u)continue;
-  const p=row.punches, last=p.at(-1), site=p[0]||row.assignment;
-  if(siteId && !p.some(e=>e.site_id===siteId)&&row.assignment?.site_id!==siteId)continue;
+  const original_punches=row.punches,rectifications=row.rectifications||[];
+  const p=applyRectifications(original_punches,rectifications), last=p.at(-1), site=p[0]||row.assignment||original_punches[0]||rectifications[0];
+  if(siteId && !p.some(e=>e.site_id===siteId)&&row.assignment?.site_id!==siteId&&!original_punches.some(e=>e.site_id===siteId)&&!rectifications.some(e=>e.site_id===siteId))continue;
   const minutes=duration(p,row.day===today()&&last?.type!=='out');
-  rows.push({worker_id:u.id,worker_name:u.name,trade:u.trade,employee_code:u.employee_code,day:row.day,site_id:site?.site_id||'',site_name:site?.site_name||'—',site_city:site?.site_city||'—',punches:p,status:!p.length?'Sem marcação':last.type==='out'?'Concluído':row.day===today()?'Em andamento':'Pendente',minutes});
+  rows.push({worker_id:u.id,worker_name:u.name,trade:u.trade,employee_code:u.employee_code,day:row.day,site_id:site?.site_id||'',site_name:site?.site_name||'—',site_city:site?.site_city||'—',punches:p,original_punches,rectifications,rectified:rectifications.length>0,status:!p.length?'Sem marcação':last.type==='out'?'Concluído':row.day===today()?'Em andamento':'Pendente',minutes});
  }
  rows.sort((a,b)=>b.day.localeCompare(a.day)||a.worker_name.localeCompare(b.worker_name));return rows;
 }
@@ -307,14 +365,14 @@ app.get('/api/admin/report/export',auth,admin,wrap(async(req,res)=>{
  if(format==='xlsx'){
   const book=new ExcelJS.Workbook();book.creator='ObraPonto';book.created=new Date();
   const sh=book.addWorksheet('Jornada individual');
-  sh.columns=[{width:15},{width:32},{width:30},{width:27},{width:19},{width:19},{width:17},{width:46}];
+  sh.columns=[{width:15},{width:32},{width:30},{width:27},{width:19},{width:19},{width:17},{width:46},{width:46},{width:80}];
   sh.addRow([name]);sh.addRow(['Relatório individual de funcionário']);
   sh.addRow(['Funcionário',worker.name,'Matrícula',worker.employee_code||'—']);
   sh.addRow(['Período',from+' a '+to]);sh.addRow([]);
-  const head=sh.addRow(['Data','Funcionário','Obra','Cidade','Situação','Horas decimais','Minutos','Marcações']);
+  const head=sh.addRow(['Data','Funcionário','Obra','Cidade','Situação','Horas decimais','Minutos','Marcações consideradas','Marcações originais','Retificações (auditoria)']);
   head.font={bold:true,color:{argb:'FFFFFFFF'}};head.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF5145A0'}};
   const hm=dt=>new Date(dt).toLocaleTimeString('pt-BR',{timeZone:'America/Sao_Paulo',hour:'2-digit',minute:'2-digit'});
-  for(const row of rows)sh.addRow([row.day,row.worker_name,row.site_name,row.site_city,row.status,Number((row.minutes/60).toFixed(2)),row.minutes,row.punches.map(p=>p.type+': '+hm(p.at)).join(' | ')]);
+  for(const row of rows)sh.addRow([row.day,row.worker_name,row.site_name,row.site_city,row.status,Number((row.minutes/60).toFixed(2)),row.minutes,row.punches.map(p=>p.type+': '+hm(p.at)+(p.rectified?' [retificada]':'')).join(' | '),row.original_punches.map(p=>p.type+': '+hm(p.at)).join(' | '),row.rectifications.map(correctionText).join('\n')]);
   sh.addRow(['TOTAL','','','','',Number((total/60).toFixed(2)),total]);sh.getRow(sh.rowCount).font={bold:true};
   sh.views=[{state:'frozen',ySplit:6}];
   res.set('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -391,7 +449,7 @@ app.get('/api/admin/report/export',auth,admin,wrap(async(req,res)=>{
   const hh=fmtHours(row.minutes);
   const barHeight=Math.max(measure(summary,width-112,10,true),measure(hh,86,11,true))+16;
   const siteHeight=measure(site,width-20,10);
-  const marks=row.punches.map(p=>`${titles[p.type]||p.type}: ${fmtTime(p.at)}`);
+  const marks=row.punches.map(p=>`${titles[p.type]||p.type}: ${fmtTime(p.at)}${p.rectified?' (retificada)':''}`);
   if(!marks.length)marks.push('Sem marcação');
   const groups=[];
   for(let i=0;i<marks.length;i+=4)groups.push(marks.slice(i,i+4).join('  |  '));
@@ -409,6 +467,18 @@ app.get('/api/admin/report/export',auth,admin,wrap(async(req,res)=>{
     y=textLine(date+' — Continuação das marcações',left+10,y,width-20,10,true)+6;
    }
    y=textLine(groups[i],left+10,y,width-20,9,false,navy)+5;
+  }
+  if(row.rectified){
+   const originals='Originais: '+(row.original_punches.map(p=>(titles[p.type]||p.type)+': '+fmtTime(p.at)).join(' | ')||'Sem marcação');
+   const notes=[originals,...row.rectifications.map(correctionText)];
+   for(const note of notes){
+    const chunks=note.match(/.{1,220}(?:\s|$)|.{1,220}/gu)||[note];
+    for(const chunk of chunks){
+     const h=measure(chunk,width-20,8)+4;
+     if(y+h>bottom){nextPage();y=textLine(date+' — Auditoria da retificação',left+10,y,width-20,10,true)+6;}
+     y=textLine(chunk.trim(),left+10,y,width-20,8,false,muted)+4;
+    }
+   }
   }
   divider(y+2);y+=12;
  }
@@ -447,11 +517,53 @@ app.post('/api/worker/requests',auth,wrap((req,res)=>{
 }));
 app.get('/api/worker/requests',auth,wrap((req,res)=>{
  if(req.user.role!=='worker')fail(403,'Somente funcionários.');
- res.json({requests:db.prepare('SELECT * FROM requests WHERE user_id=? ORDER BY created_at DESC LIMIT 30').all(req.user.id)});
+ res.json({requests:db.prepare('SELECT r.*,EXISTS(SELECT 1 FROM punch_rectifications c WHERE c.request_id=r.id) AS rectified FROM requests r WHERE r.user_id=? ORDER BY r.created_at DESC LIMIT 30').all(req.user.id)});
 }));
-app.get('/api/admin/requests',auth,admin,(_req,res)=>res.json({requests:db.prepare('SELECT r.*,u.name AS worker_name FROM requests r JOIN users u ON r.user_id=u.id ORDER BY (r.status=\'pending\') DESC,r.created_at DESC LIMIT 100').all()}));
+app.get('/api/admin/requests',auth,admin,(_req,res)=>res.json({requests:db.prepare('SELECT r.*,u.name AS worker_name,EXISTS(SELECT 1 FROM punch_rectifications c WHERE c.request_id=r.id) AS rectified FROM requests r JOIN users u ON r.user_id=u.id ORDER BY (r.status=\'pending\') DESC,r.created_at DESC LIMIT 100').all()}));
+
+app.get('/api/admin/requests/:id/rectification',auth,admin,wrap((req,res)=>{
+ const r=db.prepare('SELECT * FROM requests WHERE id=?').get(req.params.id);
+ if(!r)fail(404,'Solicitação não encontrada.');
+ const originals=allPunchesForDay(r.user_id,r.day),changes=rectificationsForDay(r.user_id,r.day);
+ const assignment=db.prepare('SELECT site_id FROM assignments WHERE worker_id=? AND day=?').get(r.user_id,r.day);
+ res.json({originals,punches:applyRectifications(originals,changes),rectifications:changes,revision:revisionOf(changes),site_id:assignment?.site_id||originals[0]?.site_id||'',sites:db.prepare('SELECT id,name,city FROM sites ORDER BY name').all(),editable:r.day<today()&&r.status!=='rejected'&&!changes.some(c=>c.request_id===r.id)});
+}));
+app.post('/api/admin/requests/:id/rectification',auth,admin,wrap((req,res)=>{
+ const result=db.transaction(()=>{
+  const r=db.prepare('SELECT * FROM requests WHERE id=?').get(req.params.id);
+  if(!r)fail(404,'Solicitação não encontrada.');
+  if(r.day>=today())fail(409,'Retificação disponível somente para dias anteriores.');
+  if(r.status==='rejected')fail(409,'Solicitação recusada. Envie uma nova solicitação.');
+  const originals=allPunchesForDay(r.user_id,r.day),changes=rectificationsForDay(r.user_id,r.day);
+  if(changes.some(c=>c.request_id===r.id))fail(409,'Esta solicitação já foi retificada.');
+  if(typeof req.body.revision!=='string'||req.body.revision!==revisionOf(changes))fail(409,'O histórico foi alterado. Reabra o formulário.');
+  const effective=applyRectifications(originals,changes);
+  const action=str(req.body.action,10),reason=str(req.body.reason,500);
+  if(!['add','adjust','void'].includes(action))fail(400,'Ação inválida.');
+  if(reason.length<5)fail(400,'Informe uma justificativa com pelo menos 5 caracteres.');
+  const target=action==='add'?null:effective.find(p=>p.id===str(req.body.target_id,40));
+  if(action!=='add'&&!target)fail(404,'Marcação não encontrada.');
+  const type=target?.type||str(req.body.type,20),site_id=target?.site_id||str(req.body.site_id,40);
+  if(!['in','break_start','break_end','out'].includes(type))fail(400,'Tipo de marcação inválido.');
+  const site=db.prepare('SELECT id,name,city FROM sites WHERE id=?').get(site_id);
+  if(!site)fail(400,'Selecione uma obra válida.');
+  const corrected_at=action==='void'?null:localRectificationTime(r.day,req.body.time);
+  if(action==='adjust'&&correctionTime(target.at)===req.body.time)fail(400,'Informe um horário diferente do atual.');
+  const c={id:id(),request_id:r.id,user_id:r.user_id,day:r.day,action,target_id:target?.id||null,type,site_id,previous_at:target?.at||null,corrected_at,reason,actor_id:req.user.id,actor_name:req.user.name,created_at:now()};
+  const proposed=applyRectifications(effective,[{...c,site_name:site.name,site_city:site.city}]);
+  if(!validPunchSequence(proposed))fail(400,'A retificação deixaria as marcações fora da sequência válida. Confira os horários e tipos.');
+  db.prepare('INSERT INTO punch_rectifications (id,request_id,user_id,day,action,target_id,type,site_id,previous_at,corrected_at,reason,actor_id,actor_name,created_at) VALUES (@id,@request_id,@user_id,@day,@action,@target_id,@type,@site_id,@previous_at,@corrected_at,@reason,@actor_id,@actor_name,@created_at)').run(c);
+  db.prepare("UPDATE requests SET status='reviewed',admin_note=?,decided_at=? WHERE id=?").run('Retificação registrada.',c.created_at,r.id);
+  audit(req.user.id,'punch_rectified',c.id,JSON.stringify({request_id:r.id,action,day:r.day}));
+  return c;
+ })();
+ changed('punches',result.user_id);changed('requests',result.user_id);
+ res.status(201).json({ok:true,rectification:result});
+}));
+
 app.patch('/api/admin/requests/:id',auth,admin,wrap((req,res)=>{
  const r=db.prepare('SELECT * FROM requests WHERE id=?').get(req.params.id);if(!r)fail(404,'Solicitação não encontrada.');
+ if(db.prepare('SELECT id FROM punch_rectifications WHERE request_id=?').get(r.id))fail(409,'Solicitação já retificada.');
  const status=str(req.body.status);if(!['reviewed','rejected'].includes(status))fail(400,'Status inválido.');
  db.prepare('UPDATE requests SET status=?,admin_note=?,decided_at=? WHERE id=?').run(status,str(req.body.admin_note,300),now(),r.id);
  audit(req.user.id,'request_reviewed',r.id,status);changed('requests',r.user_id);res.json({ok:true});
