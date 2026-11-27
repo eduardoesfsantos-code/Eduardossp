@@ -329,37 +329,94 @@ app.get('/api/admin/report/export',auth,admin,wrap(async(req,res)=>{
  const fmtDate=day=>day.split('-').reverse().join('/');
  const fmtTime=ts=>new Date(ts).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',timeZone:'America/Sao_Paulo'});
  const fmtHours=minutes=>`${Math.floor(minutes/60)}h${String(minutes%60).padStart(2,'0')}`;
- const formatPunches=row=>{
-  const titles={in:'Entrada',break_start:'Início intervalo',break_end:'Fim intervalo',out:'Saída'};
-  return row.punches.map(p=>`${titles[p.type]||p.type}: ${fmtTime(p.at)}`).join('  |  ')||'Sem marcação';
+ const titles={in:'Entrada',break_start:'Início intervalo',break_end:'Fim intervalo',out:'Saída'};
+ const navy='#102C49',orange='#E87917',muted='#506278',line='#D8E1EA',pale='#F1F5F9';
+ const left=40, width=doc.page.width-80, right=left+width;
+ const bottom=doc.page.height-102;
+ const period=fmtDate(from)+' a '+fmtDate(to);
+ let page=1, y=40;
+ const font=(size,bold=false,color=navy)=>doc.font(bold?'Helvetica-Bold':'Helvetica').fontSize(size).fillColor(color);
+ const textLine=(value,x,top,w,size=10,bold=false,color=navy,align='left')=>{
+  font(size,bold,color);
+  const opts={width:w,align,lineGap:2};
+  const height=doc.heightOfString(String(value),opts);
+  doc.text(String(value),x,top,opts);
+  return top+height;
  };
- const rule=()=>{
-  doc.moveDown(0.2);
-  const yy=doc.y;doc.strokeColor('#E0E4EA').moveTo(40,yy).lineTo(555,yy).stroke();
-  doc.moveDown(0.45);
+ const measure=(value,w,size=10,bold=false)=>{
+  font(size,bold);
+  return doc.heightOfString(String(value),{width:w,lineGap:2});
  };
- doc.fillColor('#2C3450').font('Helvetica-Bold').fontSize(18).text(name,{width:515});
- doc.moveDown(0.25).fontSize(13).text('Relatório individual de jornada');
- doc.moveDown(0.5).font('Helvetica').fontSize(9);
- if(company.legal_name)doc.text('Razão social: '+company.legal_name);
- if(company.cnpj)doc.text('CNPJ: '+company.cnpj);
- doc.text('Funcionário: '+worker.name);
- doc.text('Matrícula: '+(worker.employee_code||'—')+'   Função: '+(worker.trade||'—'));
- doc.text('Período: '+fmtDate(from)+' a '+fmtDate(to));
- doc.text('Total trabalhado no período: '+fmtHours(total));
- rule();
- if(!rows.length)doc.fontSize(10).fillColor('#555').text('Nenhum registro de jornada encontrado no período selecionado.');
- for(const row of rows){
-  if(doc.y>682){doc.addPage();doc.fillColor('#2C3450').font('Helvetica-Bold').fontSize(10).text(name+' — Continuação do relatório');rule();}
-  doc.fillColor('#2C3450').font('Helvetica-Bold').fontSize(10).text(fmtDate(row.day)+'    '+fmtHours(row.minutes)+'    '+row.status);
-  doc.font('Helvetica').fontSize(9).fillColor('#48546B').text('Obra: '+row.site_name+' — '+row.site_city,{width:515});
-  doc.fontSize(8.5).fillColor('#5D687A').text(formatPunches(row),{width:515});
-  rule();
+ const divider=yy=>doc.strokeColor(line).lineWidth(0.7).moveTo(left,yy).lineTo(right,yy).stroke();
+ const footer=()=>{
+  const fy=doc.page.height-85;
+  divider(fy);
+  textLine('Horários no fuso de São Paulo. Relatório operacional para consulta e impressão; não substitui AFD, AEJ ou documentos fiscais exigidos pela legislação trabalhista.',left,fy+7,width-68,8,false,muted);
+  textLine('Página '+page,right-65,fy+7,65,8,true,muted,'right');
+ };
+ const header=first=>{
+  y=40;
+  doc.rect(left,y,5,28).fill(orange);
+  y=textLine('ObraPonto | Controle de jornada',left+13,y+1,width-13,11,true,navy)+5;
+  y=textLine(name,left+13,y,width-13,first?19:13,true,navy)+9;
+  divider(y);y+=10;
+  if(first){
+   y=textLine('Relatório individual de jornada',left,y,width,15,true)+8;
+   if(company.legal_name)y=textLine('Razão social: '+company.legal_name,left,y,width,9,false,muted)+3;
+   if(company.cnpj)y=textLine('CNPJ: '+company.cnpj,left,y,width,9,false,muted)+3;
+  }
+  y=textLine('Funcionário: '+worker.name,left,y,width,11,true)+4;
+  y=textLine('Matrícula: '+(worker.employee_code||'—')+'   |   Função: '+(worker.trade||'—'),left,y,width,10,false,muted)+4;
+  y=textLine('Período: '+period,left,y,width,10,false,muted)+10;
+  if(first){
+   const h=55;
+   doc.roundedRect(left,y,width,h,6).fill(pale);
+   doc.rect(left,y,4,h).fill(orange);
+   textLine('TOTAL TRABALHADO NO PERÍODO',left+13,y+9,width-26,9,true,muted);
+   textLine(fmtHours(total),left+13,y+24,width-26,18,true);
+   y+=h+14;
+  }
+  y=textLine('Registros por dia',left,y,width,11,true)+7;
+ };
+ const nextPage=()=>{footer();doc.addPage();page++;header(false);};
+ const ensure=h=>{if(y+h>bottom)nextPage();};
+ header(true);
+ if(!rows.length){
+  ensure(35);
+  y=textLine('Nenhum registro de jornada encontrado no período selecionado.',left,y,width,10,false,muted)+12;
  }
- if(doc.y>690)doc.addPage();
- doc.moveDown(0.3).fillColor('#1F2B44').font('Helvetica-Bold').fontSize(12).text('TOTAL: '+fmtHours(total));
- doc.moveDown(0.8).font('Helvetica').fontSize(8).fillColor('#6A7080')
-  .text('Horários no fuso de São Paulo. Relatório operacional para consulta e impressão; não substitui AFD, AEJ ou documentos fiscais exigidos pela legislação trabalhista.');
+ for(const row of rows){
+  const date=fmtDate(row.day), summary=date+'  |  '+row.status;
+  const site='Obra: '+row.site_name+'  |  Cidade: '+row.site_city;
+  const hh=fmtHours(row.minutes);
+  const barHeight=Math.max(measure(summary,width-112,10,true),measure(hh,86,11,true))+16;
+  const siteHeight=measure(site,width-20,10);
+  const marks=row.punches.map(p=>`${titles[p.type]||p.type}: ${fmtTime(p.at)}`);
+  if(!marks.length)marks.push('Sem marcação');
+  const groups=[];
+  for(let i=0;i<marks.length;i+=4)groups.push(marks.slice(i,i+4).join('  |  '));
+  const firstMarkHeight=measure(groups[0],width-20,9);
+  ensure(barHeight+siteHeight+firstMarkHeight+28);
+  doc.roundedRect(left,y,width,barHeight,4).fill(pale);
+  textLine(summary,left+10,y+8,width-112,10,true);
+  textLine(hh,right-96,y+7,86,11,true,navy,'right');
+  y+=barHeight+7;
+  y=textLine(site,left+10,y,width-20,10,false,muted)+5;
+  for(let i=0;i<groups.length;i++){
+   const h=measure(groups[i],width-20,9)+5;
+   if(y+h>bottom){
+    nextPage();
+    y=textLine(date+' — Continuação das marcações',left+10,y,width-20,10,true)+6;
+   }
+   y=textLine(groups[i],left+10,y,width-20,9,false,navy)+5;
+  }
+  divider(y+2);y+=12;
+ }
+ ensure(48);
+ doc.roundedRect(left,y,width,38,5).fill(pale);
+ textLine('TOTAL DO PERÍODO',left+12,y+12,width-130,10,true);
+ textLine(fmtHours(total),right-110,y+10,98,13,true,navy,'right');
+ footer();
  doc.end();
 }));
 app.get('/api/worker/history',auth,wrap((req,res)=>{
