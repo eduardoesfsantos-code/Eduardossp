@@ -25,7 +25,7 @@ db.pragma('busy_timeout = 10000');
 const tables=new Map(db.prepare("SELECT name,sql FROM sqlite_master WHERE type='table'").all().map(t=>[t.name,t.sql]));
 const userColumns=new Set(db.pragma('table_info(users)').map(c=>c.name));
 const migrationNeeded=tables.has('users')&&(
- ['sites','assignments','punches','requests','email_verification','privacy_requests','punch_rectifications','audit','company_profile','worker_notices','private_documents','work_orders'].some(t=>!tables.has(t))||
+ ['sites','assignments','punches','requests','email_verification','privacy_requests','punch_rectifications','audit','company_profile','worker_notices','private_documents','work_orders','notification_reads'].some(t=>!tables.has(t))||
  ['archived_at','email_verified_at','photo_data_url','shift'].some(c=>!userColumns.has(c))||
  !tables.get('private_documents')?.includes("'timesheet'")
 );
@@ -167,6 +167,11 @@ db.exec(`CREATE TABLE IF NOT EXISTS work_orders (
  accepted_at TEXT, started_at TEXT, completed_at TEXT, cancelled_at TEXT, completion_note TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS work_orders_worker ON work_orders(worker_id,number DESC);`);
+// Leitura da central é individual; confirmar um aviso continua sendo ação separada.
+db.exec(`CREATE TABLE IF NOT EXISTS notification_reads (
+ user_id TEXT NOT NULL REFERENCES users(id), event_key TEXT NOT NULL, read_at TEXT NOT NULL,
+ PRIMARY KEY(user_id,event_key)
+);`);
 const documentsEnabled=process.env.OBRAPONTO_PRIVATE_DOCUMENTS==='1';
 const companyProfile=()=>{
  const row=db.prepare('SELECT * FROM company_profile WHERE id=1').get();
@@ -672,6 +677,53 @@ app.get('/api/admin/dashboard',auth,admin,wrap((_req,res)=>{
  res.json({day,overview,activity,stats:{employees:workers.length,present:overview.filter(w=>w.last_type&&w.last_type!=='out').length,completed:overview.filter(w=>w.last_type==='out').length,missing:overview.filter(w=>!w.last_type).length,sites:db.prepare('SELECT COUNT(*) AS n FROM sites WHERE active=1').get().n,punchesToday:punches.length,pendingRequests:db.prepare("SELECT COUNT(*) AS n FROM requests WHERE status='pending'").get().n}});
 }));
 
+// Central de notificações: eventos derivados dos registros persistentes, sem duplicar documentos.
+// Cada consulta é limitada; somente os 100 eventos mais recentes são exibidos e contabilizados.
+const recentNotifications=user=>{
+ const items=[];
+ const add=(key,created_at,title,detail,target)=>{if(created_at)items.push({id:key,created_at,title,detail,target});};
+ if(user.role==='admin'){
+  for(const r of db.prepare("SELECT r.id,r.created_at,u.name FROM requests r JOIN users u ON u.id=r.user_id ORDER BY r.created_at DESC LIMIT 100").all())
+   add('request:'+r.id,r.created_at,'Nova solicitação de ponto',r.name,'requests');
+  for(const n of db.prepare("SELECT n.id,n.read_at,u.name FROM worker_notices n JOIN users u ON u.id=n.worker_id WHERE n.read_at IS NOT NULL ORDER BY n.read_at DESC LIMIT 100").all())
+   add('notice-ack:'+n.id,n.read_at,'Leitura de aviso confirmada',n.name,'workers');
+  for(const o of db.prepare("SELECT o.id,o.number,o.accepted_at,o.started_at,o.completed_at,u.name FROM work_orders o JOIN users u ON u.id=o.worker_id WHERE o.accepted_at IS NOT NULL ORDER BY COALESCE(o.completed_at,o.started_at,o.accepted_at) DESC LIMIT 100").all()){
+   const label=o.name+' · OS #'+o.number;
+   add('order-accepted:'+o.id,o.accepted_at,'Ordem de serviço recebida',label,'orders');
+   add('order-started:'+o.id,o.started_at,'Ordem de serviço iniciada',label,'orders');
+   add('order-completed:'+o.id,o.completed_at,'Ordem de serviço concluída',label,'orders');
+  }
+  if(documentsEnabled)for(const d of db.prepare("SELECT d.id,d.created_at,u.name FROM private_documents d JOIN users u ON u.id=d.worker_id WHERE d.kind='medical' ORDER BY d.created_at DESC LIMIT 100").all())
+   add('document:'+d.id,d.created_at,'Novo documento recebido',d.name,'workers');
+ }else{
+  for(const n of db.prepare("SELECT id,message,created_at FROM worker_notices WHERE worker_id=? ORDER BY created_at DESC LIMIT 100").all(user.id))
+   add('notice:'+n.id,n.created_at,'Aviso da empresa',n.message.slice(0,180),'notices');
+  for(const r of db.prepare("SELECT id,status,decided_at FROM requests WHERE user_id=? AND decided_at IS NOT NULL ORDER BY decided_at DESC LIMIT 100").all(user.id))
+   add('request-reviewed:'+r.id+':'+r.decided_at,r.decided_at,'Solicitação de ponto atualizada',r.status==='rejected'?'Solicitação recusada. Consulte os detalhes.':'Consulte a resposta da empresa.','requests');
+  if(documentsEnabled){
+   for(const d of db.prepare("SELECT id,period,created_at FROM private_documents WHERE worker_id=? AND kind='timesheet' ORDER BY created_at DESC LIMIT 100").all(user.id))
+    add('document:'+d.id,d.created_at,'Folha de ponto disponível','Competência '+d.period,'documents');
+   for(const d of db.prepare("SELECT id,reviewed_at FROM private_documents WHERE worker_id=? AND kind='medical' AND reviewed_at IS NOT NULL ORDER BY reviewed_at DESC LIMIT 100").all(user.id))
+    add('document-reviewed:'+d.id+':'+d.reviewed_at,d.reviewed_at,'Documento analisado','Consulte a situação em Meus documentos.','documents');
+  }
+ }
+ const read=db.prepare('SELECT read_at FROM notification_reads WHERE user_id=? AND event_key=?');
+ return items.sort((a,b)=>b.created_at.localeCompare(a.created_at)||b.id.localeCompare(a.id)).slice(0,100).map(n=>({...n,read_at:read.get(user.id,n.id)?.read_at||null}));
+};
+app.get('/api/notifications',auth,wrap((req,res)=>{
+ const notifications=recentNotifications(req.user);
+ res.json({notifications,unread:notifications.filter(n=>!n.read_at).length});
+}));
+app.patch('/api/notifications/read',auth,wrap((req,res)=>{
+ const keys=req.body.ids;
+ if(!Array.isArray(keys)||keys.length>100||keys.some(k=>typeof k!=='string'||k.length>150))fail(400,'Lista de notificações inválida.');
+ const allowed=new Set(recentNotifications(req.user).map(n=>n.id));
+ if(keys.some(k=>!allowed.has(k)))fail(404,'Notificação não encontrada.');
+ const insert=db.prepare('INSERT OR IGNORE INTO notification_reads(user_id,event_key,read_at) VALUES (?,?,?)');
+ db.transaction(()=>{for(const key of keys)insert.run(req.user.id,key,now());})();
+ // Não marca avisos como confirmados nem altera documentos, OS ou solicitações.
+ res.json({ok:true});
+}));
 // Avisos internos individuais; sem envio de dados a provedores de push.
 app.post('/api/admin/workers/:id/notices',auth,admin,wrap((req,res)=>{
  const worker=db.prepare("SELECT id FROM users WHERE id=? AND role='worker' AND active=1").get(req.params.id);
