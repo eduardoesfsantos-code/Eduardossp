@@ -203,27 +203,44 @@ function CompanyPage({requester,refresh,notify}){
 }
 function LocalBackup({requester,refresh,notify}){
  const {data,loading}=useRecords(requester,['/admin/local-backup'],refresh);
- const [current,setCurrent]=useState(''),[password,setPassword]=useState(''),[repeat,setRepeat]=useState(''),[busy,setBusy]=useState(false),[show,setShow]=useState(false);
+ const [current,setCurrent]=useState(''),[password,setPassword]=useState(''),[repeat,setRepeat]=useState(''),[busy,setBusy]=useState(false),[show,setShow]=useState(false),[confirming,setConfirming]=useState(false),[message,setMessage]=useState(''),[error,setError]=useState(false),[file,setFile]=useState(null);
  const config=data?.[0];
- const download=async e=>{
+ const feedback=(msg,isError=false)=>{setMessage(msg);setError(isError);};
+ const ask=e=>{
   e.preventDefault();if(busy)return;
-  if(password!==repeat){notify('As senhas de backup não coincidem.');return;}
-  if(!confirm('O backup contém dados confidenciais da empresa. Salve em local seguro. Deseja continuar?'))return;
-  setBusy(true);
+  setFile(null);
+  if(!current){feedback('Digite sua senha de acesso atual.',true);return;}
+  if(password.length<16||password.length>128){feedback('Crie uma senha de backup de 16 a 128 caracteres.',true);return;}
+  if(password===current){feedback('A senha do backup deve ser diferente da senha de acesso.',true);return;}
+  if(password!==repeat){feedback('As senhas de backup não coincidem.',true);return;}
+  feedback('');setConfirming(true);
+ };
+ const generate=async()=>{
+  if(busy)return;setConfirming(false);setBusy(true);feedback('Gerando e criptografando seu backup...');
   try{
    const response=await fetch('/api/admin/local-backup',{method:'POST',headers:{Authorization:'Bearer '+(localStorage.getItem(APP_KEY)||''),'Content-Type':'application/json'},body:JSON.stringify({current_password:current,backup_password:password}),cache:'no-store'});
-   if(!response.ok){const error=await response.json().catch(()=>({}));throw Error(error.error||'Falha ao gerar backup.');}
-   const blob=await response.blob();if(!blob.size||blob.size>8388608||blob.type!=='application/octet-stream')throw Error('Backup inválido.');
-   await saveReportFile({blob,name:'obraponto-backup-'+new Date().toISOString().replace(/[:.]/g,'-')+'.enc'});
-   notify('Backup gerado. Confirme o salvamento no dispositivo.');window.dispatchEvent(new Event('obraponto:refresh'));
-  }catch(e){notify(e.message);}finally{setBusy(false);setCurrent('');setPassword('');setRepeat('');setShow(false);}
+   if(!response.ok){const problem=await response.json().catch(()=>({}));throw Error(problem.error||(response.status===429?'Muitas tentativas. Tente novamente mais tarde.':'Falha ao gerar backup (HTTP '+response.status+').'));}
+   const blob=await response.blob();if(!blob.size||blob.size>8388608||!blob.type.includes('application/octet-stream'))throw Error('O servidor não retornou um backup válido.');
+   setFile({blob,name:'obraponto-backup-'+new Date().toISOString().replace(/[:.]/g,'-')+'.enc'});
+   feedback('Backup criptografado gerado! Toque em Baixar arquivo para escolher onde salvar.');
+   window.dispatchEvent(new Event('obraponto:refresh'));
+  }catch(e){feedback(e.message||'Não foi possível gerar o backup.',true);}finally{setBusy(false);setCurrent('');setPassword('');setRepeat('');setShow(false);}
+ };
+ const download=async()=>{
+  if(!file||busy)return;setBusy(true);
+  try{await saveReportFile(file);feedback('Salvamento solicitado. Escolha a pasta e confirme Salvar. Confira o arquivo no aplicativo Arquivos.');}
+  catch(e){feedback('Não foi possível abrir o salvamento. Tente novamente. '+(e.message||''),true);}
+  finally{setBusy(false);}
  };
  return <div className="worker-panel"><h2>Backup local da empresa</h2><p>Gere uma cópia criptografada para guardar em um local seguro. A restauração deverá ser solicitada ao suporte; não substitui o servidor.</p>
  {loading&&!config?<Spinner/>:!config?.enabled?<p>Disponível após a liberação da função na homologação.</p>:<><p>Última geração: {config.last_generated_at?displayDateTime(config.last_generated_at):'Nenhuma'}</p>
- <form className="stack-form" onSubmit={download}><Field label="Sua senha de acesso atual"><TextInput type="password" autoComplete="current-password" required value={current} onChange={e=>setCurrent(e.target.value)}/></Field>
+ <form className="stack-form" noValidate onSubmit={ask}><Field label="Sua senha de acesso atual"><TextInput type="password" autoComplete="current-password" required value={current} onChange={e=>setCurrent(e.target.value)}/></Field>
  <Field label="Senha exclusiva do backup (mínimo 16 caracteres)"><div className="with-icon"><TextInput style={{paddingRight:48}} type={show?'text':'password'} autoComplete="new-password" minLength={16} maxLength={128} required value={password} onChange={e=>setPassword(e.target.value)}/><button type="button" className="reveal" aria-label={show?'Ocultar senha':'Mostrar senha'} onClick={()=>setShow(v=>!v)}>{show?<EyeOff size={18}/>:<Eye size={18}/>}</button></div></Field>
  <Field label="Repita a senha do backup"><TextInput type="password" autoComplete="new-password" minLength={16} maxLength={128} required value={repeat} onChange={e=>setRepeat(e.target.value)}/></Field>
- <p className="micro-note">Até 8 MB. Guarde a senha separadamente; sem ela não é possível recuperar o arquivo. O backup inclui informações pessoais e documentos confidenciais.</p><Primary icon={Download} type="submit" disabled={busy}>{busy?'Gerando...':'Gerar e baixar backup'}</Primary></form></>}</div>;
+ <p className="micro-note">Até 8 MB. Guarde a senha separadamente; sem ela não é possível recuperar o arquivo. O backup inclui informações pessoais e documentos confidenciais.</p><Primary icon={Download} type="submit" disabled={busy||confirming}>{busy?'Processando...':'Gerar backup'}</Primary></form>
+ {message&&<div role={error?'alert':'status'} className={error?'inline-error':'worker-panel'} style={{marginTop:12}}>{message}</div>}
+ {file&&<div style={{marginTop:12}}><small>{file.name} · {Math.ceil(file.blob.size/1024)} KB</small><Primary icon={Download} type="button" disabled={busy} onClick={download}>Baixar arquivo (.enc)</Primary><button type="button" className="action-link" disabled={busy} onClick={()=>{setFile(null);feedback('Arquivo temporário removido da tela.');}}>Limpar arquivo da tela</button></div>}
+ {confirming&&<Modal title="Confirmar geração do backup" subtitle="Dados confidenciais da empresa" onClose={()=>setConfirming(false)}><p>Guarde o arquivo em um local seguro e mantenha a senha separada. Deseja gerar a cópia criptografada?</p><div className="modal-actions"><Primary type="button" variant="btn-light" onClick={()=>setConfirming(false)}>Cancelar</Primary><Primary type="button" icon={Download} onClick={generate}>Confirmar e gerar</Primary></div></Modal>}</>}</div>;
 }
 function SettingsPage({requester,refresh,notify}){
  const {data,loading}=useRecords(requester,['/admin/company'],refresh),[form,setForm]=useState(null),[busy,setBusy]=useState(false);
