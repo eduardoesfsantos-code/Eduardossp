@@ -1,0 +1,26 @@
+name: Validar PDF e retificação ObraPonto 1.4.0
+on:
+  push:
+    branches: [feature/relatorio-pdf-1.4.0, feature/gestao-equipes-1.4.0, feature/notificacoes-1.4.0, feature/email-obrigatorio-1.4.0, feature/isolamento-empresas-1.4.0]
+  pull_request:
+    branches: [homologacao/rc4-visual, feature/gestao-equipes-1.4.0]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  teste-isolado:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: obraponto_android/ObraPonto_Servidor_Central
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --no-audit --no-fund
+      - run: npm run check
+      - run: node test-rectifications.mjs
+
+      - run: node test-company-isolation.mjs
