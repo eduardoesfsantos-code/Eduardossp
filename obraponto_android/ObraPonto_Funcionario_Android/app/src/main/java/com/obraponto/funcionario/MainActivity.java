@@ -300,14 +300,17 @@ public class MainActivity extends Activity {
     private class MobileBridge {
         @JavascriptInterface public void saveCsv(String dataUrl,String name) {
             runOnUiThread(() -> {
-                if (dataUrl==null || !dataUrl.startsWith("data:") || dataUrl.length()>20000000) return;
+                if (dataUrl==null || !dataUrl.startsWith("data:") || dataUrl.length()>20000000 || !dataUrl.contains(";base64,")) {Toast.makeText(MainActivity.this,"Arquivo inválido ou grande demais",Toast.LENGTH_LONG).show();return;}
+                if (pendingCsv!=null) {Toast.makeText(MainActivity.this,"Conclua o salvamento anterior",Toast.LENGTH_LONG).show();return;}
                 pendingCsv=dataUrl;
                 Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);
                 i.addCategory(Intent.CATEGORY_OPENABLE);
-                i.setType("text/csv");
+                
                 String sanitized=(name==null?"relatorio-obraponto.csv":name).replaceAll("[^a-zA-Z0-9._-]","_");
+                String ext=sanitized.toLowerCase(java.util.Locale.ROOT);
+                i.setType(ext.endsWith(".pdf")?"application/pdf":ext.endsWith(".xlsx")?"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":ext.endsWith(".png")?"image/png":(ext.endsWith(".jpg")||ext.endsWith(".jpeg"))?"image/jpeg":ext.endsWith(".enc")?"application/octet-stream":"text/csv");
                 i.putExtra(Intent.EXTRA_TITLE,sanitized);
-                try {startActivityForResult(i,SAVE_CSV);} catch(Exception e){Toast.makeText(MainActivity.this,"Não foi possível abrir o salvamento",Toast.LENGTH_LONG).show();}
+                try {startActivityForResult(i,SAVE_CSV);} catch(Exception e){pendingCsv=null;Toast.makeText(MainActivity.this,"Não foi possível abrir o salvamento",Toast.LENGTH_LONG).show();}
             });
         }
     }
@@ -321,10 +324,13 @@ public class MainActivity extends Activity {
                     if (out==null) throw new Exception("Erro ao abrir arquivo");
                     out.write(bytes);
                 }
-                Toast.makeText(this,"Relatório salvo",Toast.LENGTH_LONG).show();
-            } catch(Exception e) {Toast.makeText(this,"Não foi possível salvar o relatório",Toast.LENGTH_LONG).show();}
+                Toast.makeText(this,"Arquivo salvo com sucesso",Toast.LENGTH_LONG).show();
+            } catch(Exception e) {Toast.makeText(this,"Não foi possível salvar o arquivo",Toast.LENGTH_LONG).show();}
         }
-        if (requestCode==SAVE_CSV) pendingCsv=null;
+        if (requestCode==SAVE_CSV) {
+            if(resultCode!=RESULT_OK) Toast.makeText(this,"Salvamento cancelado",Toast.LENGTH_SHORT).show();
+            pendingCsv=null;
+        }
     }
     private void showConnectionError() {
         if (mainFrame==null) return;
