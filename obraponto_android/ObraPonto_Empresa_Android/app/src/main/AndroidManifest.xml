@@ -3,8 +3,8 @@
   <uses-permission android:name="android.permission.INTERNET"/>
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
   <application android:allowBackup="false" android:usesCleartextTraffic="false"
-      android:label="@string/app_name" android:icon="@drawable/brand_logo"
-      android:roundIcon="@drawable/brand_logo" android:supportsRtl="true" android:theme="@style/ObraTheme">
+      android:label="@string/app_name" android:icon="@drawable/launcher_empresa"
+      android:roundIcon="@drawable/launcher_empresa" android:supportsRtl="true" android:theme="@style/ObraTheme">
     <activity android:name=".MainActivity" android:exported="true"
        android:windowSoftInputMode="adjustResize"
        android:configChanges="orientation|screenSize|keyboardHidden">
