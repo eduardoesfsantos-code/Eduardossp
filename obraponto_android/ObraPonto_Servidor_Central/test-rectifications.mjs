@@ -30,7 +30,7 @@ const secret='isolated-test-secret-not-for-production-123456789';
 const adminEmail='admin@example.test', password='Test-only-Password-123';
 const workerEmail='worker@example.test';
 const cwd=path.dirname(fileURLToPath(import.meta.url));
-const server=spawn(process.execPath,['server.js'],{cwd,env:{...process.env,DB_PATH:dbFile,PORT:String(port),JWT_SECRET:secret,ADMIN_EMAIL:adminEmail,ADMIN_NAME:'Admin Teste',ADMIN_PASSWORD:password,NODE_ENV:'test',RESEND_API_KEY:'',OBRAPONTO_EMAIL_FROM:'',OBRAPONTO_PRIVATE_DOCUMENTS:'1'},stdio:['ignore','pipe','pipe']});
+const server=spawn(process.execPath,['server.js'],{cwd,env:{...process.env,DB_PATH:dbFile,PORT:String(port),JWT_SECRET:secret,ADMIN_EMAIL:adminEmail,ADMIN_NAME:'Admin Teste',ADMIN_PASSWORD:password,NODE_ENV:'test',RESEND_API_KEY:'',OBRAPONTO_EMAIL_FROM:'',OBRAPONTO_PRIVATE_DOCUMENTS:'1',OBRAPONTO_REQUIRE_EMAIL_VERIFICATION:'1'},stdio:['ignore','pipe','pipe']});
 let logs='',db;
 server.stdout.on('data',d=>logs+=d);
 server.stderr.on('data',d=>logs+=d);
@@ -69,6 +69,14 @@ try{
  const day=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Sao_Paulo',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(Date.now()-2*86400000));
  const originalAt=day+'T08:00:00-03:00';
  db=new Database(dbFile);db.pragma('foreign_keys=ON');
+ assert.equal((await call('/me',worker)).user.email_verification_required,true);
+ await call('/sites',worker,'GET',undefined,403);
+ await call('/worker/today',worker,'GET',undefined,403);
+ await call('/notifications',worker,'GET',undefined,403);
+ await call('/worker/requests',worker,'POST',{day,message:'Não autorizado'},403);
+ // Confirmação inicial simulada exclusivamente no banco de teste.
+ db.prepare('UPDATE users SET email_verified_at=? WHERE id=?').run(new Date().toISOString(),workerId);
+ assert.equal((await call('/me',worker)).user.email_verification_required,false);
  const at=new Date(originalAt).toISOString();
  db.prepare('INSERT INTO punches (id,user_id,site_id,day,type,at,created_at) VALUES (?,?,?,?,?,?,?)').run('original-in',workerId,site,day,'in',at,at);
  const before=db.prepare('SELECT * FROM punches WHERE user_id=?').all(workerId);
@@ -110,6 +118,8 @@ try{
  assert.equal(row.punches.length,1);assert.equal(row.original_punches.length,1);assert.equal(row.rectifications.length,3);assert.equal(row.status,'Pendente');
  assert.deepEqual(db.prepare('SELECT * FROM punches WHERE user_id=?').all(workerId),before);
  const verifyPath='/worker/email-verification';
+ db.prepare('UPDATE users SET email_verified_at=NULL WHERE id=?').run(workerId);
+ await call('/sites',worker,'GET',undefined,403);
  assert.equal((await call(verifyPath,worker)).verified,false);
  await call(verifyPath,admin,'GET',undefined,403);
  await call(verifyPath+'/send',worker,'POST',{},503);
@@ -121,15 +131,23 @@ try{
  assert.equal(db.prepare('SELECT attempts FROM email_verification WHERE user_id=?').get(workerId).attempts,1);
  await call(verifyPath+'/confirm',worker,'POST',{code},200);
  assert.equal((await call(verifyPath,worker)).verified,true);
+ assert.equal((await call('/me',worker)).user.email_verification_required,false);
+ await call('/sites',worker);
  assert.equal(db.prepare('SELECT digest FROM email_verification WHERE user_id=?').get(workerId).digest,'');
  await call('/admin/workers/'+workerId,admin,'PATCH',{email:'worker-new@example.test'});
  assert.equal((await call(verifyPath,worker)).verified,false);
  await call(verifyPath+'/confirm',worker,'POST',{code},400);
+ assert.equal((await call('/me',worker)).user.email_verification_required,true);
+ await call('/notifications',worker,'GET',undefined,403);
+ // Demais testes usam uma conta fictícia já verificada.
+ db.prepare('UPDATE users SET email_verified_at=? WHERE id=?').run(new Date().toISOString(),workerId);
  const privacy=await call('/privacy/requests',worker,'POST',{kind:'deletion',message:'Solicito análise de exclusão da conta de teste.'},201);
  await call('/privacy/requests',worker,'POST',{kind:'deletion',message:'Solicitação repetida de teste.'},409);
  await call('/admin/privacy/requests',worker,'GET',undefined,403);
  const otherId=(await call('/admin/workers',admin,'POST',{name:'Outro colaborador',email:'other@example.test',password},201)).worker.id;
  const other=(await call('/login',null,'POST',{email:'other@example.test',password})).token;
+ await call('/notifications',other,'GET',undefined,403);
+ db.prepare('UPDATE users SET email_verified_at=? WHERE id=?').run(new Date().toISOString(),otherId);
  assert.equal((await call('/privacy/requests',other)).requests.length,0);
  // Gestão de equipes: apenas administração edita foto/turno; demais contas não acessam o cadastro.
  const photo='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/sfoAAAAASUVORK5CYII=';

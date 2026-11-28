@@ -199,7 +199,10 @@ const workerPhoto=value=>{
  if(buf.length>100000||!(head.includes('png')?png:jpg))fail(400,'Foto inválida ou acima de 100 KB.');
  return value;
 };
-const safeUser = u => u && ({id:u.id,name:u.name,email:u.email,phone:u.phone,employee_code:u.employee_code,trade:u.trade,role:u.role,active:!!u.active,created_at:u.created_at,archived_at:u.archived_at||null,email_verified:!!u.email_verified_at,photo_data_url:u.photo_data_url||'',shift:u.shift||'unspecified'});
+// Habilitar somente após validar entrega de e-mail e manter alternativa de registro de jornada.
+const emailGateEnabled=process.env.OBRAPONTO_REQUIRE_EMAIL_VERIFICATION==='1';
+const needsEmailVerification=u=>emailGateEnabled&&u.role==='worker'&&!u.email_verified_at;
+const safeUser = u => u && ({id:u.id,name:u.name,email:u.email,phone:u.phone,employee_code:u.employee_code,trade:u.trade,role:u.role,active:!!u.active,created_at:u.created_at,archived_at:u.archived_at||null,email_verified:!!u.email_verified_at,email_verification_required:needsEmailVerification(u),photo_data_url:u.photo_data_url||'',shift:u.shift||'unspecified'});
 const audit = (actorId, action, objectId='', detail='') => db.prepare('INSERT INTO audit VALUES (?,?,?,?,?,?)').run(id(),actorId,action,objectId,String(detail).slice(0,500),now());
 const secret = process.env.JWT_SECRET;
 if (!secret || secret.length < 32 || secret.includes('SUBSTITUA')) {
@@ -238,7 +241,14 @@ function auth(req,res,next) {
   const payload = jwt.verify(token,secret,{algorithms:['HS256']});
   const user = db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(payload.sub);
   if(!user) return res.status(401).json({error:'Sessão inválida ou usuário inativo.'});
-  req.user=user; next();
+  req.user=user;
+  if(needsEmailVerification(user)){
+   const route=req.path.replace(/\/$/,'');
+   const allowed=(req.method==='GET'&&['/api/me','/api/worker/email-verification'].includes(route))||
+    (req.method==='POST'&&['/api/worker/email-verification/send','/api/worker/email-verification/confirm'].includes(route));
+   if(!allowed)return res.status(403).json({code:'EMAIL_VERIFICATION_REQUIRED',error:'Confirme seu e-mail antes de acessar o aplicativo.'});
+  }
+  next();
  } catch {res.status(401).json({error:'Entre na sua conta novamente.'});}
 }
 const admin = (req,res,next) => req.user.role==='admin' ? next() : res.status(403).json({error:'Acesso restrito à administração.'});
@@ -249,7 +259,7 @@ const changed = (resource, workerId=null) => {
  if(resource==='sites'||resource==='company') io.to('workers').emit('changed',{resource});
 };
 io.use((socket,next)=>{
- try {const p=jwt.verify(socket.handshake.auth?.token||'',secret,{algorithms:['HS256']}); const u=db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(p.sub); if(!u)throw Error('unauthorized'); socket.data.user=u; next();} catch{next(new Error('Não autorizado'));}
+ try {const p=jwt.verify(socket.handshake.auth?.token||'',secret,{algorithms:['HS256']}); const u=db.prepare('SELECT * FROM users WHERE id=? AND active=1').get(p.sub); if(!u||needsEmailVerification(u))throw Error('unauthorized'); socket.data.user=u; next();} catch{next(new Error('Não autorizado'));}
 });
 io.on('connection', socket=> {const u=socket.data.user; socket.join(u.role==='admin'?'admins':'workers'); if(u.role==='worker') socket.join(`worker:${u.id}`);});
 
@@ -268,10 +278,10 @@ const workerOnly=(req,res,next)=>req.user.role==='worker'?next():res.status(403)
 const verificationLimit=rateLimit({windowMs:15*60*1000,limit:60,standardHeaders:'draft-8',legacyHeaders:false});
 app.get('/api/worker/email-verification',auth,workerOnly,wrap((req,res)=>{
  const pending=db.prepare('SELECT sent_at FROM email_verification WHERE user_id=?').get(req.user.id);
- res.json({email:req.user.email,verified:!!req.user.email_verified_at,available:mailReady(),retry_after:pending?Math.max(0,Math.ceil((pending.sent_at+60000-Date.now())/1000)):0});
+ res.json({email:req.user.email,verified:!!req.user.email_verified_at,available:mailReady(),required:needsEmailVerification(req.user),retry_after:pending?Math.max(0,Math.ceil((pending.sent_at+60000-Date.now())/1000)):0});
 }));
 app.post('/api/worker/email-verification/send',auth,workerOnly,verificationLimit,wrap(async(req,res)=>{
- if(!mailReady())fail(503,'Envio de e-mail ainda não configurado. Seu ponto continua disponível.');
+ if(!mailReady())fail(503,'Envio de e-mail indisponível. Procure a administração para regularizar seu acesso e registrar a jornada.');
  const code=String(randomInt(0,1000000)).padStart(6,'0'),nonce=id(),t=Date.now();
  const destination=db.transaction(()=>{
   const u=db.prepare('SELECT email,email_verified_at FROM users WHERE id=? AND active=1').get(req.user.id);
@@ -285,12 +295,17 @@ app.post('/api/worker/email-verification/send',auth,workerOnly,verificationLimit
   db.prepare('INSERT INTO email_verification (user_id,email,nonce,digest,expires_at,sent_at,window_start,send_count,attempts) VALUES (?,?,?,?,?,?,?,?,0) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email,nonce=excluded.nonce,digest=excluded.digest,expires_at=excluded.expires_at,sent_at=excluded.sent_at,window_start=excluded.window_start,send_count=excluded.send_count,attempts=0').run(req.user.id,u.email,nonce,emailDigest(req.user.id,u.email,nonce,code),t+10*60*1000,t,sameWindow?old.window_start:t,count+1);
   return u.email;
  })();
+ let providerStatus=0;
  try{
   const response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:'Bearer '+process.env.RESEND_API_KEY,'Content-Type':'application/json','Idempotency-Key':'obraponto-email-'+nonce},body:JSON.stringify({from:process.env.OBRAPONTO_EMAIL_FROM,to:[destination],subject:'ObraPonto — confirme seu e-mail',text:'Seu código de confirmação é '+code+'. Ele expira em 10 minutos. Não compartilhe este código. Se você não solicitou, ignore esta mensagem.'}),signal:AbortSignal.timeout(10000)});
+  providerStatus=response.status;
   if(!response.ok)throw Error('Falha do provedor de e-mail.');
  }catch{
   db.prepare('UPDATE email_verification SET expires_at=0,digest=? WHERE user_id=? AND nonce=?').run('',req.user.id,nonce);
-  fail(503,'Não foi possível enviar o código. Tente novamente mais tarde.');
+  // Somente status técnico; não registrar destinatário, chave, código ou corpo da resposta.
+  console.warn('EMAIL_VERIFICATION_SEND_FAILED status='+providerStatus);
+  const messages={401:'Serviço de e-mail não autenticado. Avise a administração.',403:'Envio não autorizado pelo serviço de e-mail. Avise a administração.',429:'Limite temporário do serviço de e-mail. Tente novamente mais tarde.'};
+  fail(503,messages[providerStatus]||'Não foi possível enviar o código. Tente novamente mais tarde.');
  }
  audit(req.user.id,'email_verification_sent',req.user.id);
  res.json({ok:true,expires_in:600,retry_after:60});
@@ -368,7 +383,7 @@ app.patch('/api/admin/workers/:id',auth,admin,wrap((req,res)=>{
  const shift=req.body.shift===undefined?u.shift:workerShift(req.body.shift);
  if(req.body.password && req.body.password.length<8)fail(400,'Senha deve ter no mínimo 8 caracteres.');
  try {db.prepare('UPDATE users SET name=?,email_verified_at=CASE WHEN email=? COLLATE NOCASE THEN email_verified_at ELSE NULL END,email=?,phone=?,employee_code=?,trade=?,active=?,password_hash=?,archived_at=?,photo_data_url=?,shift=? WHERE id=?').run(name,email,email,req.body.phone===undefined?u.phone:str(req.body.phone,30),req.body.employee_code===undefined?u.employee_code:str(req.body.employee_code,30),req.body.trade===undefined?u.trade:str(req.body.trade,90),active,pass,req.body.restore===true?null:u.archived_at,photo,shift,u.id);}catch(e){if(e.code?.includes('CONSTRAINT'))fail(409,'E-mail já cadastrado.');throw e;}
- audit(req.user.id,'worker_updated',u.id,name);changed('workers',u.id);res.json({ok:true});
+ audit(req.user.id,'worker_updated',u.id,name);changed('workers',u.id);if(emailGateEnabled&&email!==u.email)io.in('worker:'+u.id).disconnectSockets(true);res.json({ok:true});
 }));
 // Exclusão segura = arquivamento; acesso revogado, registros históricos preservados.
 app.delete('/api/admin/workers/:id',auth,admin,wrap((req,res)=>{
