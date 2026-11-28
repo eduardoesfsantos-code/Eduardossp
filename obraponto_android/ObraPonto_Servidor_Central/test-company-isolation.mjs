@@ -10,7 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {createServer} from 'node:net';
 import {io} from 'socket.io-client';
 import Database from 'better-sqlite3';
-import {createEncryptedBackup,restoreEncryptedBackup} from './backup-encrypted.mjs';
+import {createEncryptedBackup,restoreEncryptedBackup,restorePasswordBackup} from './backup-encrypted.mjs';
 const root=mkdtempSync(path.join(tmpdir(),'obraponto-isolamento-'));
 const cwd=path.dirname(fileURLToPath(import.meta.url)),instances=[],sockets=[];
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
@@ -20,7 +20,7 @@ const start=async label=>{
  await new Promise((resolve,reject)=>{probe.once('error',reject);probe.listen(0,'127.0.0.1',resolve);});
  const port=probe.address().port;await new Promise(r=>probe.close(r));
  const dbPath=path.join(root,label,'db.sqlite'),secret=randomBytes(48).toString('hex'),password='Teste-isolado-'+label+'-123456';
- const server=spawn(process.execPath,['server.js'],{cwd,env:{...process.env,PORT:String(port),DB_PATH:dbPath,JWT_SECRET:secret,ADMIN_EMAIL:email,ADMIN_NAME:'Admin '+label,ADMIN_PASSWORD:password,NODE_ENV:'test',RESEND_API_KEY:'',OBRAPONTO_EMAIL_FROM:'',OBRAPONTO_PRIVATE_DOCUMENTS:'1',OBRAPONTO_REQUIRE_EMAIL_VERIFICATION:'1'},stdio:['ignore','pipe','pipe']});
+ const server=spawn(process.execPath,['server.js'],{cwd,env:{...process.env,PORT:String(port),DB_PATH:dbPath,JWT_SECRET:secret,ADMIN_EMAIL:email,ADMIN_NAME:'Admin '+label,ADMIN_PASSWORD:password,NODE_ENV:'test',RESEND_API_KEY:'',OBRAPONTO_EMAIL_FROM:'',OBRAPONTO_PRIVATE_DOCUMENTS:'1',OBRAPONTO_REQUIRE_EMAIL_VERIFICATION:'1',OBRAPONTO_LOCAL_BACKUP:'1'},stdio:['ignore','pipe','pipe']});
  const instance={label,server,dbPath,password,base:'http://127.0.0.1:'+port,logs:''};instances.push(instance);
  server.stdout.on('data',d=>instance.logs+=d);server.stderr.on('data',d=>instance.logs+=d);
  for(let i=0;i<120;i++){try{if((await fetch(instance.base+'/api/health')).ok)return instance;}catch{}if(server.exitCode!==null)break;await wait(150);}
@@ -107,6 +107,25 @@ try{
   for(const {name} of tables){const quoted='"'+name.replaceAll('"','""')+'"';assert.deepEqual(recovered.prepare('SELECT * FROM '+quoted+' ORDER BY rowid').all(),original.prepare('SELECT * FROM '+quoted+' ORDER BY rowid').all(),name);}
   assert.ok(!recovered.prepare('SELECT id FROM users WHERE id=?').get(b.workerId));
  }finally{original.close();recovered.close();}
+ // Backup local com senha: somente administrador autenticado e reautenticado.
+ const pass='Senha-exclusiva-backup-teste-123',payload={current_password:a.password,backup_password:pass};
+ await call(a,'/admin/local-backup',a.worker,'GET',undefined,403);
+ await call(a,'/admin/local-backup',a.worker,'POST',payload,403);
+ await call(a,'/admin/local-backup',b.admin,'POST',payload,401);
+ await call(a,'/admin/local-backup',a.admin,'POST',{...payload,current_password:'errada'},403);
+ await call(a,'/admin/local-backup',a.admin,'POST',{...payload,backup_password:a.password},400);
+ const local=await call(a,'/admin/local-backup',a.admin,'POST',payload);
+ assert.ok(Buffer.isBuffer(local));assert.ok(!local.includes(Buffer.from('SQLite format 3')));
+ const localFile=path.join(storage,'local.enc'),localRestored=path.join(recovery,'local.sqlite');
+ writeFileSync(localFile,local);assert.throws(()=>restorePasswordBackup(localFile,localRestored,'Senha-incorreta-teste-123'));
+ assert.ok(!existsSync(localRestored));restorePasswordBackup(localFile,localRestored,pass);
+ const localDb=new Database(localRestored,{readonly:true});try{
+  assert.ok(localDb.prepare('SELECT id FROM users WHERE id=?').get(a.workerId));
+  assert.ok(!localDb.prepare('SELECT id FROM users WHERE id=?').get(b.workerId));
+  assert.ok(localDb.prepare('SELECT id FROM private_documents WHERE id=?').get(a.doc));
+ }finally{localDb.close();}
+ assert.ok((await call(a,'/admin/local-backup',a.admin)).last_generated_at);
+ console.log('BACKUP_LOCAL_OK: autenticação, senha exclusiva, criptografia e recuperação em banco novo.');
  console.log('BACKUP_RESTAURACAO_OK: snapshot, AES-GCM, rejeição de chave incorreta/adulteração, integridade e registros preservados.');
  console.log('ISOLAMENTO_INSTANCIAS_OK: credenciais, JWT, WebSocket, funcionários, obras, pontos, OS, avisos e documentos.');
 }finally{
