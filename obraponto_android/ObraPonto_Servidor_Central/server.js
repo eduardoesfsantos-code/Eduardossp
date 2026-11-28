@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import PDFDocument from 'pdfkit';
 import ExcelJS from 'exceljs';
+import {createPasswordBackup,LOCAL_BACKUP_LIMIT} from './backup-encrypted.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const dbPath = path.resolve(here, process.env.DB_PATH || './data/obraponto.sqlite');
@@ -681,6 +682,23 @@ app.get('/api/admin/report',auth,admin,wrap((req,res)=>{
  const from=dayParam(req.query.from,new Date(Date.now()-14*86400000).toISOString().slice(0,10)),to=dayParam(req.query.to);
  if(from>to)fail(400,'Data inicial maior que final.');
  res.json({rows:reportRows({from,to,siteId:str(req.query.site_id,40),workerId:str(req.query.worker_id,40),allUsers:true}).filter(r=>!req.query.worker_id||r.worker_id===req.query.worker_id)});
+}));
+// Backup local somente administrativo, explícito e com reautenticação; sem restauração via HTTP.
+const localBackupEnabled=process.env.OBRAPONTO_LOCAL_BACKUP==='1';
+const localBackupRate=rateLimit({windowMs:15*60*1000,limit:5,standardHeaders:'draft-8',legacyHeaders:false});
+app.get('/api/admin/local-backup',auth,admin,wrap((_req,res)=>{
+ const last=db.prepare("SELECT at FROM audit WHERE action='local_backup_generated' ORDER BY at DESC LIMIT 1").get();
+ res.json({enabled:localBackupEnabled,last_generated_at:last?.at||null,max_bytes:LOCAL_BACKUP_LIMIT});
+}));
+app.post('/api/admin/local-backup',auth,admin,localBackupRate,wrap((req,res)=>{
+ if(!localBackupEnabled)fail(503,'Backup local ainda não liberado.');
+ const {current_password,backup_password}=req.body||{};
+ if(typeof current_password!=='string'||current_password.length>256||!bcrypt.compareSync(current_password,req.user.password_hash))fail(403,'Senha atual incorreta.');
+ if(typeof backup_password!=='string'||backup_password.length<16||backup_password.length>128||Buffer.byteLength(backup_password)>512||backup_password===current_password)fail(400,'Escolha uma senha de backup diferente da sua senha de acesso, com 16 a 128 caracteres.');
+ if(db.pragma('page_count',{simple:true})*db.pragma('page_size',{simple:true})>LOCAL_BACKUP_LIMIT)fail(413,'Banco acima do limite de 8 MB. Solicite backup ao suporte.');
+ let bytes;try{bytes=createPasswordBackup(dbPath,backup_password);}catch{fail(503,'Não foi possível gerar um backup íntegro dentro do limite. Procure o suporte.');}
+ audit(req.user.id,'local_backup_generated','','Cópia criptografada solicitada pelo administrador.');
+ res.set('X-Content-Type-Options','nosniff');res.attachment('obraponto-backup-'+today()+'.enc');res.type('application/octet-stream').send(bytes);
 }));
 app.get('/api/admin/dashboard',auth,admin,wrap((_req,res)=>{
  const day=today();
