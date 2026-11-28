@@ -29,7 +29,7 @@ const normalizeError=e=>e?.message||'Ocorreu um erro. Tente novamente.';
 async function api(path,{token,method='GET',body}={}){
  const response=await fetch('/api'+path,{method,headers:{...(body?{'Content-Type':'application/json'}:{}),...(token?{Authorization:`Bearer ${token}`}:{})},body:body?JSON.stringify(body):undefined});
  const json=await response.json().catch(()=>({}));
- if(!response.ok)throw new Error(json.error||`Erro ${response.status}`);
+ if(!response.ok){if(json.code==='EMAIL_VERIFICATION_REQUIRED')window.dispatchEvent(new Event('obraponto:refresh'));throw new Error(json.error||`Erro ${response.status}`);}
  return json;
 }
 function useApi(token,logout){return (path,options)=>api(path,{token,...options}).catch(e=>{if(/Sessão inválida|Entre na sua conta/.test(e.message))logout();throw e;});}
@@ -413,31 +413,35 @@ function PrivacyPanel({requester,refresh,notify,admin=false}){
 }
 
 
-function EmailVerification({requester,refresh,notify,compact=false}){
+function EmailVerification({requester,refresh,notify,compact=false,required=false}){
  const [status,setStatus]=useState(null),[code,setCode]=useState(''),[busy,setBusy]=useState(false),[sent,setSent]=useState(false),[error,setError]=useState('');
  const endpoint='/worker/email-verification';
  useEffect(()=>{let active=true;requester(endpoint).then(d=>{if(active)setStatus(d);}).catch(e=>{if(active)setError(e.message);});return()=>{active=false;};},[refresh]);
- if(!status)return null;
+ if(!status)return required?<div className="worker-panel">{error?<p role="alert">{error}</p>:<Spinner/>}</div>:null;
  if(compact&&status.verified)return null;
  const send=async()=>{if(busy)return;setBusy(true);setError('');try{await requester(endpoint+'/send',{method:'POST',body:{}});setSent(true);setCode('');notify('Código enviado ao seu e-mail.');}catch(e){setError(e.message);}finally{setBusy(false);}};
  const verify=async e=>{e.preventDefault();if(busy)return;setBusy(true);setError('');try{await requester(endpoint+'/confirm',{method:'POST',body:{code}});setStatus(v=>({...v,verified:true}));setCode('');notify('E-mail verificado com sucesso.');window.dispatchEvent(new Event('obraponto:refresh'));}catch(e){setError(e.message);}finally{setBusy(false);}};
  return <div className="worker-panel" style={{marginTop:12,padding:16}}><div className="block-title"><span className="block-icon"><Mail size={20}/></span><div><h2>{status.verified?'E-mail verificado':'Confirme seu e-mail'}</h2><small>{status.email}</small></div></div>
- {status.verified?<Pill text="Verificado" tone="success"/>:<><p>Confirme o endereço cadastrado pela empresa. Seu registro de ponto continua disponível.</p>
+ {status.verified?<Pill text="Verificado" tone="success"/>:<><p>Confirme o endereço cadastrado pela empresa. {required?'Após confirmar, você terá acesso ao aplicativo.':'Seu registro de ponto continua disponível.'}</p>
  {!status.available?<p className="micro-note">O envio de códigos ainda não está disponível.</p>:<><Primary disabled={busy} onClick={send}>{sent?'Reenviar código':'Enviar código de verificação'}</Primary><form className="stack-form" style={{marginTop:12}} onSubmit={verify}><Field label="Código de seis dígitos"><TextInput required inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={code} onChange={e=>setCode(e.target.value.replace(/[^0-9]/g,''))}/></Field><Primary type="submit" disabled={busy||code.length!==6}>Confirmar e-mail</Primary></form></>}
  {sent&&<small>O código é válido por 10 minutos. Confira também a caixa de spam.</small>}{error&&<p role="alert">{error}</p>}</>}
  </div>;
 }
 
+function EmailGate({token,user,onLogout,refresh,notify}){
+ const requester=useApi(token,onLogout);
+ return <main className="worker-content"><Logo/><div className="worker-greeting" style={{marginTop:28}}><div className="eyebrow">SEGURANÇA DA CONTA</div><h1>Confirme seu e-mail</h1><p>Olá, {user.name}. Valide seu endereço para entrar no ObraPonto.</p></div><EmailVerification requester={requester} refresh={refresh} notify={notify} required/><div className="worker-panel"><p>Não recebeu o código ou o e-mail está incorreto? Procure a empresa para corrigir o cadastro e registrar sua jornada por uma alternativa.</p><Primary type="button" variant="btn-light btn-block" icon={LogOut} onClick={onLogout}>Sair da conta</Primary></div></main>;
+}
 function WorkerProfile({user,onLogout}){const fields=[[UserRound,'Nome completo',user.name],[BriefcaseBusiness,'Função',user.trade||'Não informada'],[Hash,'Matrícula',user.employee_code||'Não informada'],[Mail,'E-mail',user.email],[Phone,'Telefone',user.phone||'Não informado'],[Clock3,'Turno',shiftLabel(user.shift)]];return <><div className="worker-greeting"><div className="eyebrow">MINHA CONTA</div><h1>Meu perfil</h1><p>Dados cadastrados pela empresa</p></div><div className="worker-profile-card"><Avatar name={user.name} size="large" photo={user.photo_data_url}/><h2>{user.name}</h2><Pill text={user.trade||'Funcionário'} tone="blue"/></div><div className="worker-panel profile-fields">{fields.map(([Icon,title,value])=><div className="profile-row" key={title}><span className="profile-icon"><Icon size={18}/></span><div><small>{title}</small><strong>{value}</strong></div></div>)}</div><Primary variant="btn-light btn-block" icon={LogOut} onClick={onLogout}>Sair da conta</Primary></>}
 function App(){const [token,setToken]=useState(localStorage.getItem(APP_KEY)||''),[user,setUser]=useState(null),[checking,setChecking]=useState(!!localStorage.getItem(APP_KEY)),[refresh,setRefresh]=useState(0),[toast,setToast]=useState('');
  const logout=()=>{localStorage.removeItem(APP_KEY);setToken('');setUser(null);};
  const onLogin=({token,user})=>{localStorage.setItem(APP_KEY,token);setToken(token);setUser(user);};
  useEffect(()=>{if(!token){setChecking(false);return;}let alive=true;setChecking(true);api('/me',{token}).then(d=>{if(alive){if(d.user.role!==(isAdminApp?'admin':'worker')){logout();return;}setUser(d.user);}}).catch(()=>{if(alive)logout();}).finally(()=>{if(alive)setChecking(false);});return()=>{alive=false;};},[token]);
  useEffect(()=>{if(!token||!refresh)return;let alive=true;api('/me',{token}).then(d=>{if(alive&&d.user.role===(isAdminApp?'admin':'worker'))setUser(d.user);}).catch(()=>{});return()=>{alive=false;};},[token,refresh]);
- useEffect(()=>{if(!token)return;const s=io({auth:{token},transports:['websocket','polling'],reconnection:true});const handler=()=>setRefresh(n=>n+1);s.on('changed',handler);s.on('connect',handler);window.addEventListener('obraponto:refresh',handler);window.addEventListener('focus',handler);return()=>{s.disconnect();window.removeEventListener('obraponto:refresh',handler);window.removeEventListener('focus',handler);};},[token]);
+ useEffect(()=>{if(!token)return;const handler=()=>setRefresh(n=>n+1);const s=user&&!user.email_verification_required?io({auth:{token},transports:['websocket','polling'],reconnection:true}):null;s?.on('changed',handler);s?.on('connect',handler);s?.on('disconnect',handler);window.addEventListener('obraponto:refresh',handler);window.addEventListener('focus',handler);return()=>{s?.off('disconnect',handler);s?.disconnect();window.removeEventListener('obraponto:refresh',handler);window.removeEventListener('focus',handler);};},[token,user?.id,user?.email_verification_required]);
  useEffect(()=>{const handler=e=>setToast(e.detail);window.addEventListener('obraponto:error',handler);return()=>window.removeEventListener('obraponto:error',handler);},[]);
  useEffect(()=>{if('serviceWorker'in navigator && import.meta.env.PROD){navigator.serviceWorker.register(isAdminApp?'/admin/sw.js':'/funcionario/sw.js',{scope:isAdminApp?'/admin/':'/funcionario/'}).catch(()=>{});}},[]);
- return <>{checking?<div className="app-loading"><Logo/><Spinner/></div>:(!token||!user)?<Login onLogin={onLogin}/>:isAdminApp?<Admin token={token} user={user} onLogout={logout} refresh={refresh} notify={setToast}/>:<Worker token={token} user={user} onLogout={logout} refresh={refresh} notify={setToast}/>}<Toast message={toast} clear={()=>setToast('')}/></>;
+ return <>{checking?<div className="app-loading"><Logo/><Spinner/></div>:(!token||!user)?<Login onLogin={onLogin}/>:isAdminApp?<Admin token={token} user={user} onLogout={logout} refresh={refresh} notify={setToast}/> :user.email_verification_required?<EmailGate token={token} user={user} onLogout={logout} refresh={refresh} notify={setToast}/>:<Worker token={token} user={user} onLogout={logout} refresh={refresh} notify={setToast}/>}<Toast message={toast} clear={()=>setToast('')}/></>;
 }
 
 createRoot(document.getElementById('root')).render(<App/>);
