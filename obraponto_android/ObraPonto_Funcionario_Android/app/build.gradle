@@ -14,8 +14,8 @@ android {
             throw new GradleException('OBRAPONTO_SAAS_BASE_URL deve ser URL HTTPS sem caminho.')
         }
         buildConfigField 'String', 'DEFAULT_ORIGIN', '"'+saasUrl+'"'
-        versionCode 140
-        versionName '1.4.0'
+        versionCode 141
+        versionName '1.4.1'
     }
 
     // Assinatura de publicação exclusivamente por variáveis protegidas do CI.
