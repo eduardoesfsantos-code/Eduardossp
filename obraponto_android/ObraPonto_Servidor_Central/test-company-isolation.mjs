@@ -3,13 +3,14 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {randomBytes} from 'node:crypto';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,rmSync,readFileSync,writeFileSync,existsSync,mkdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createServer} from 'node:net';
 import {io} from 'socket.io-client';
 import Database from 'better-sqlite3';
+import {createEncryptedBackup,restoreEncryptedBackup} from './backup-encrypted.mjs';
 const root=mkdtempSync(path.join(tmpdir(),'obraponto-isolamento-'));
 const cwd=path.dirname(fileURLToPath(import.meta.url)),instances=[],sockets=[];
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
@@ -86,6 +87,27 @@ try{
  await call(a,'/admin/workers/'+a.workerId+'/notices',a.admin,'POST',{message:'Evento exclusivo da empresa A'},201);
  for(let n=0;n<30&&!eventsA;n++)await wait(100);
  assert.ok(eventsA>0);await wait(300);assert.equal(eventsB,0);
+ // Simula armazenamento externo em outro diretório temporário, sem provedor real.
+ const storage=path.join(root,'external-simulated'),recovery=path.join(root,'recovery');mkdirSync(storage);mkdirSync(recovery);
+ const backup=path.join(storage,'empresa-a.enc'),restored=path.join(recovery,'new.sqlite'),key=randomBytes(32).toString('hex');
+ createEncryptedBackup(a.dbPath,backup,key);
+ assert.ok(!readFileSync(backup).includes(Buffer.from('SQLite format 3')));
+ assert.throws(()=>createEncryptedBackup(a.dbPath,backup,key));
+ assert.throws(()=>restoreEncryptedBackup(backup,restored,randomBytes(32).toString('hex')));
+ assert.ok(!existsSync(restored));
+ const corrupted=path.join(storage,'tampered.enc'),raw=readFileSync(backup);raw[raw.length-1]^=1;writeFileSync(corrupted,raw);
+ assert.throws(()=>restoreEncryptedBackup(corrupted,restored,key));assert.ok(!existsSync(restored));
+ restoreEncryptedBackup(backup,restored,key);
+ assert.throws(()=>restoreEncryptedBackup(backup,a.dbPath,key));
+ assert.throws(()=>restoreEncryptedBackup(backup,restored,key));
+ const original=new Database(a.dbPath,{readonly:true}), recovered=new Database(restored,{readonly:true});
+ try{
+  assert.equal(recovered.pragma('integrity_check',{simple:true}),'ok');
+  const tables=original.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
+  for(const {name} of tables){const quoted='"'+name.replaceAll('"','""')+'"';assert.deepEqual(recovered.prepare('SELECT * FROM '+quoted+' ORDER BY rowid').all(),original.prepare('SELECT * FROM '+quoted+' ORDER BY rowid').all(),name);}
+  assert.ok(!recovered.prepare('SELECT id FROM users WHERE id=?').get(b.workerId));
+ }finally{original.close();recovered.close();}
+ console.log('BACKUP_RESTAURACAO_OK: snapshot, AES-GCM, rejeição de chave incorreta/adulteração, integridade e registros preservados.');
  console.log('ISOLAMENTO_INSTANCIAS_OK: credenciais, JWT, WebSocket, funcionários, obras, pontos, OS, avisos e documentos.');
 }finally{
  for(const s of sockets)s.disconnect();
